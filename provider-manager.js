@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.4.0
+//@version 1.5.0
 //@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/provider-manager.js
 
-const CPM_VERSION = '1.4.0';
+const CPM_VERSION = '1.5.0';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -321,11 +321,21 @@ const SubPluginManager = {
         const url = plugin.updateUrl;
         if (!url) return null;
         try {
-            const res = await Risuai.nativeFetch(url, { method: 'GET' });
+            // Cache-busting to prevent stale responses
+            const cacheBuster = url + (url.includes('?') ? '&' : '?') + '_t=' + Date.now();
+            const res = await Risuai.nativeFetch(cacheBuster, {
+                method: 'GET',
+                headers: { 'Cache-Control': 'no-cache, no-store', 'Pragma': 'no-cache' }
+            });
             if (!res.ok) return null;
             const remoteCode = await res.text();
             const remoteMeta = this.extractMetadata(remoteCode);
             if (!remoteMeta.version) return null;
+            // Validate that the remote file matches this plugin (name check)
+            if (remoteMeta.name !== plugin.name) {
+                console.warn(`[CPM Update] Name mismatch for ${plugin.name}: remote has "${remoteMeta.name}". Skipping.`);
+                return null;
+            }
             const cmp = this.compareVersions(plugin.version || '0.0.0', remoteMeta.version);
             return {
                 hasUpdate: cmp > 0,
@@ -357,7 +367,13 @@ const SubPluginManager = {
         const p = this.plugins.find(x => x.id === pluginId);
         if (!p) return false;
         const meta = this.extractMetadata(newCode);
+        // Safety check: verify the remote code's name matches the plugin being updated
+        if (meta.name && p.name && meta.name !== p.name) {
+            console.error(`[CPM Update] BLOCKED: Tried to apply "${meta.name}" code to plugin "${p.name}". IDs don't match.`);
+            return false;
+        }
         p.code = newCode;
+        p.name = meta.name || p.name;
         p.version = meta.version;
         p.description = meta.description;
         p.icon = meta.icon;
@@ -1212,13 +1228,16 @@ async function handleRequest(args, activeModelDef) {
                             if (updates.length === 0) {
                                 statusDiv.innerHTML = '<p class="text-green-400 text-sm font-semibold bg-green-900/30 rounded p-3">✅ 모든 서브 플러그인이 최신 버전입니다.</p>';
                             } else {
+                                // Store update data in a Map (not in HTML attributes) to avoid encoding issues
+                                const pendingUpdates = new Map();
                                 let html = `<div class="bg-indigo-900/30 rounded p-3 space-y-3">`;
                                 html += `<p class="text-indigo-300 text-sm font-semibold">🔔 ${updates.length}개의 업데이트가 있습니다.</p>`;
                                 for (const u of updates) {
+                                    pendingUpdates.set(u.plugin.id, { code: u.remoteCode, name: u.plugin.name });
                                     html += `<div class="flex items-center justify-between bg-gray-800 rounded p-2">`;
                                     html += `<div><span class="text-white font-semibold">${u.plugin.icon || '🧩'} ${u.plugin.name}</span>`;
                                     html += `<span class="text-gray-400 text-xs ml-2">v${u.localVersion} → <span class="text-green-400">v${u.remoteVersion}</span></span></div>`;
-                                    html += `<button class="cpm-apply-update bg-green-600 hover:bg-green-500 text-white text-xs font-bold px-3 py-1 rounded" data-id="${u.plugin.id}" data-code="${btoa(unescape(encodeURIComponent(u.remoteCode)))}">⬆️ 업데이트</button>`;
+                                    html += `<button class="cpm-apply-update bg-green-600 hover:bg-green-500 text-white text-xs font-bold px-3 py-1 rounded" data-id="${u.plugin.id}">⬆️ 업데이트</button>`;
                                     html += `</div>`;
                                 }
                                 html += `</div>`;
@@ -1227,13 +1246,15 @@ async function handleRequest(args, activeModelDef) {
                                 statusDiv.querySelectorAll('.cpm-apply-update').forEach(btn => {
                                     btn.addEventListener('click', async (e) => {
                                         const id = e.target.getAttribute('data-id');
-                                        const code = decodeURIComponent(escape(atob(e.target.getAttribute('data-code'))));
+                                        const updateData = pendingUpdates.get(id);
+                                        if (!updateData) { e.target.textContent = '❌ 데이터 없음'; return; }
                                         e.target.disabled = true;
                                         e.target.textContent = '⏳ 적용 중...';
-                                        const ok = await SubPluginManager.applyUpdate(id, code);
+                                        const ok = await SubPluginManager.applyUpdate(id, updateData.code);
                                         if (ok) {
                                             e.target.textContent = '✅ 완료';
                                             e.target.classList.replace('bg-green-600', 'bg-gray-600');
+                                            pendingUpdates.delete(id);
                                             alert('업데이트 완료! 적용을 위해 새로고침(F5) 해주세요.');
                                         } else {
                                             e.target.textContent = '❌ 실패';
