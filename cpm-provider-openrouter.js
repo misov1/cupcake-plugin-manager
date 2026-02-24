@@ -2,6 +2,7 @@
 // @version 1.0.0
 // @description OpenRouter provider for Cupcake PM
 // @icon 🌐
+// @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-openrouter.js
 
 (() => {
     const CPM = window.CupcakePM;

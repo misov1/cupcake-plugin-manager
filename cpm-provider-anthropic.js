@@ -1,7 +1,8 @@
 // @name CPM Provider - Anthropic
-// @version 1.1.1
+// @version 1.2.0
 // @description Anthropic Claude provider for Cupcake PM
 // @icon 🟠
+// @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-anthropic.js
 
 (() => {
     const CPM = window.CupcakePM;
