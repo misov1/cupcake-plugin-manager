@@ -1,7 +1,7 @@
 //@name CPM Component - Copilot Token Manager
 //@display-name Cupcake Copilot Manager
 //@api 3.0
-//@version 1.2.4
+//@version 1.3.0
 //@author Cupcake
 //@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-copilot-manager.js
 
@@ -42,12 +42,40 @@
     // ==========================================
     // HELPERS
     // ==========================================
+
+    /**
+     * Sanitize a token string: trim whitespace, remove non-printable 
+     * and non-ASCII characters (zero-width spaces, BOM, etc.)
+     * These invisible chars cause:
+     *   - "non ISO-8859-1 code point" error in browser fetch headers
+     *   - "Bad credentials" from GitHub API (token corrupted)
+     */
+    function sanitizeToken(raw) {
+        if (!raw) return '';
+        // Keep only printable ASCII (0x20-0x7E)
+        return raw.replace(/[^\x20-\x7E]/g, '').trim();
+    }
+
+    /**
+     * Sanitize header values: strip any non-ISO-8859-1 characters.
+     * Browser Fetch API throws if header values contain code points > 0xFF.
+     */
+    function sanitizeHeaders(headers) {
+        const clean = {};
+        for (const [key, value] of Object.entries(headers)) {
+            clean[key] = String(value).replace(/[^\x00-\xFF]/g, '');
+        }
+        return clean;
+    }
+
     async function getToken() {
-        return (await CPM.safeGetArg(TOKEN_ARG_KEY)) || '';
+        const raw = (await CPM.safeGetArg(TOKEN_ARG_KEY)) || '';
+        return sanitizeToken(raw);
     }
 
     function setToken(value) {
-        CPM.setArg(TOKEN_ARG_KEY, value);
+        // Sanitize before saving so stored token is clean
+        CPM.setArg(TOKEN_ARG_KEY, sanitizeToken(value));
     }
 
     function toast(msg, duration = 3000) {
@@ -136,7 +164,8 @@
     async function copilotFetch(url, options = {}) {
         const Risu = window.Risuai || window.risuai;
         const method = options.method || (url.includes('github.com/login/') ? 'POST' : 'GET');
-        const headers = options.headers || {};
+        // Sanitize headers to prevent ISO-8859-1 errors in browser fetch
+        const headers = sanitizeHeaders(options.headers || {});
 
         // Parse body: callers pass JSON string, but risuFetch needs a plain object
         let body = undefined;
@@ -257,11 +286,25 @@
     }
 
     async function checkTokenStatus(token) {
+        const cleanToken = sanitizeToken(token);
+        if (!cleanToken) throw new Error('토큰이 비어있습니다. 먼저 토큰을 생성하세요.');
+        if (cleanToken !== token) {
+            console.warn(LOG_TAG, `토큰에서 비정상 문자가 제거됨 (원본 ${token.length}자 → 정제 ${cleanToken.length}자)`);
+        }
         const res = await copilotFetch('https://api.github.com/copilot_internal/v2/token', {
             method: 'GET',
-            headers: { 'Accept': 'application/json', 'Authorization': `Bearer ${token}`, 'User-Agent': USER_AGENT },
+            headers: { 'Accept': 'application/json', 'Authorization': `Bearer ${cleanToken}`, 'User-Agent': USER_AGENT },
         });
-        if (!res.ok) throw new Error(`상태 확인 실패 (${res.status}): ${await res.text()}`);
+        if (!res.ok) {
+            const errBody = await res.text();
+            if (res.status === 401) {
+                const parsed = (() => { try { return JSON.parse(errBody); } catch { return null; } })();
+                if (parsed?.message === 'Bad credentials') {
+                    throw new Error('토큰이 만료되었거나 유효하지 않습니다. 🔑 토큰 생성 버튼으로 새 토큰을 발급받으세요.');
+                }
+            }
+            throw new Error(`상태 확인 실패 (${res.status}): ${errBody}`);
+        }
         return await res.json();
     }
 
@@ -680,5 +723,5 @@
         }
     });
 
-    console.log(`${LOG_TAG} Settings tab registered (v1.2.4) — sidebar: 🔑 Copilot`);
+    console.log(`${LOG_TAG} Settings tab registered (v1.3.0) — sidebar: 🔑 Copilot`);
 })();
