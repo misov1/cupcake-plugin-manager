@@ -1,5 +1,5 @@
 // @name CPM Provider - Vertex AI
-// @version 1.0.3
+// @version 1.1.0
 // @description Google Vertex AI (Service Account) provider for Cupcake PM
 // @icon 🔷
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-vertex.js
@@ -73,6 +73,83 @@
     CPM.registerProvider({
         name: 'VertexAI',
         models,
+        fetchDynamicModels: async () => {
+            try {
+                const keyJson = await CPM.safeGetArg('cpm_vertex_key_json');
+                if (!keyJson) return null;
+                const loc = await CPM.safeGetArg('cpm_vertex_location') || 'us-central1';
+                const accessToken = await getVertexAccessToken(keyJson);
+                const key = JSON.parse(keyJson);
+                const project = key.project_id;
+                const baseUrl = loc === 'global' ? 'https://aiplatform.googleapis.com' : `https://${loc}-aiplatform.googleapis.com`;
+
+                // Fetch Gemini models from Vertex
+                let allModels = [];
+                let pageToken = null;
+                while (true) {
+                    let url = `${baseUrl}/v1beta1/publishers/google/models?pageSize=100`;
+                    if (pageToken) url += `&pageToken=${encodeURIComponent(pageToken)}`;
+                    const res = await CPM.smartFetch(url, {
+                        method: 'GET',
+                        headers: { 'Authorization': `Bearer ${accessToken}` }
+                    });
+                    if (!res.ok) break;
+                    const data = await res.json();
+                    if (data.models) allModels = allModels.concat(data.models);
+                    if (!data.nextPageToken) break;
+                    pageToken = data.nextPageToken;
+                }
+
+                const result = [];
+                // Process Gemini models
+                for (const m of allModels) {
+                    const id = (m.name || '').split('/').pop();
+                    if (!id) continue;
+                    // Only include gemini models that support generateContent
+                    if (!id.startsWith('gemini-')) continue;
+                    if (m.supportedActions && !m.supportedActions.includes('generateContent')) continue;
+                    result.push({
+                        uniqueId: `vertex-${id}`,
+                        id: id,
+                        name: m.displayName || id
+                    });
+                }
+
+                // Also list Claude models available via Vertex (Model Garden)
+                // These use a different endpoint pattern
+                try {
+                    const claudeUrl = `${baseUrl}/v1beta1/projects/${project}/locations/${loc}/publishers/anthropic/models`;
+                    const claudeRes = await CPM.smartFetch(claudeUrl, {
+                        method: 'GET',
+                        headers: { 'Authorization': `Bearer ${accessToken}` }
+                    });
+                    if (claudeRes.ok) {
+                        const claudeData = await claudeRes.json();
+                        if (claudeData.models) {
+                            for (const m of claudeData.models) {
+                                const id = (m.name || '').split('/').pop();
+                                if (!id || !id.startsWith('claude-')) continue;
+                                let name = m.displayName || id;
+                                const dateMatch = id.match(/(\d{4})(\d{2})(\d{2})/);
+                                if (dateMatch && !name.includes('/')) name += ` (${dateMatch[1]}/${dateMatch[2]}/${dateMatch[3]})`;
+                                result.push({
+                                    uniqueId: `vertex-${id}`,
+                                    id: id,
+                                    name: name
+                                });
+                            }
+                        }
+                    }
+                } catch (ce) {
+                    console.warn('[CPM-Vertex] Claude model listing not available:', ce.message);
+                }
+
+                return result.length > 0 ? result : null;
+            } catch (e) {
+                console.warn('[CPM-Vertex] Dynamic model fetch error:', e);
+                return null;
+            }
+        },
         fetcher: async function (modelDef, messages, temp, maxTokens, args) {
             const config = {
                 keyJson: await CPM.safeGetArg('cpm_vertex_key_json'),
