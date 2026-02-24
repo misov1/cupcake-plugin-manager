@@ -1,6 +1,6 @@
 // @name CPM Provider - OpenAI
-// @version 1.1.4
-// @description OpenAI provider for Cupcake PM
+// @version 1.2.0
+// @description OpenAI provider for Cupcake PM (Streaming)
 // @icon 🟢
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-openai.js
 
@@ -64,7 +64,7 @@
                 return null;
             }
         },
-        fetcher: async function (modelDef, messages, temp, maxTokens, args) {
+        fetcher: async function (modelDef, messages, temp, maxTokens, args, abortSignal) {
             const config = {
                 url: await CPM.safeGetArg('cpm_openai_url'),
                 key: await CPM.safeGetArg('cpm_openai_key'),
@@ -81,6 +81,7 @@
                 messages: CPM.formatToOpenAI(messages, config),
                 temperature: temp,
                 max_tokens: maxTokens,
+                stream: true,
             };
             if (args.top_p !== undefined && args.top_p !== null) body.top_p = args.top_p;
             if (args.frequency_penalty !== undefined && args.frequency_penalty !== null) body.frequency_penalty = args.frequency_penalty;
@@ -98,10 +99,9 @@
                 headers['Editor-Plugin-Version'] = 'copilot-chat/0.11.1';
             }
 
-            const res = await Risuai.nativeFetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+            const res = await Risuai.nativeFetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: abortSignal });
             if (!res.ok) return { success: false, content: `[OpenAI Error ${res.status}] ${await res.text()}` };
-            const data = await res.json();
-            return { success: true, content: data.choices?.[0]?.message?.content || '' };
+            return { success: true, content: CPM.createSSEStream(res, CPM.parseOpenAISSELine, abortSignal) };
         },
         settingsTab: {
             id: 'tab-openai',

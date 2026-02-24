@@ -1,6 +1,6 @@
 // @name CPM Provider - Vertex AI
-// @version 1.1.3
-// @description Google Vertex AI (Service Account) provider for Cupcake PM
+// @version 1.2.0
+// @description Google Vertex AI (Service Account) provider for Cupcake PM (Streaming)
 // @icon 🔷
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-vertex.js
 
@@ -150,7 +150,7 @@
                 return null;
             }
         },
-        fetcher: async function (modelDef, messages, temp, maxTokens, args) {
+        fetcher: async function (modelDef, messages, temp, maxTokens, args, abortSignal) {
             const config = {
                 keyJson: await CPM.safeGetArg('cpm_vertex_key_json'),
                 location: await CPM.safeGetArg('cpm_vertex_location'),
@@ -167,7 +167,7 @@
             const model = config.model || 'gemini-2.5-flash';
             const accessToken = await getVertexAccessToken(config.keyJson);
             const baseUrl = loc === 'global' ? 'https://aiplatform.googleapis.com' : `https://${loc}-aiplatform.googleapis.com`;
-            const url = `${baseUrl}/v1beta1/projects/${project}/locations/${loc}/publishers/google/models/${model}:generateContent`;
+            const url = `${baseUrl}/v1beta1/projects/${project}/locations/${loc}/publishers/google/models/${model}:streamGenerateContent?alt=sse`;
 
             const { contents, systemInstruction: sys } = CPM.formatToGemini(messages, config);
             const body = { contents, generationConfig: { temperature: temp, maxOutputTokens: maxTokens } };
@@ -183,31 +183,14 @@
             const res = await Risuai.nativeFetch(url, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` },
-                body: JSON.stringify(body)
+                body: JSON.stringify(body),
+                signal: abortSignal
             });
             if (!res.ok) {
                 if (res.status === 401 || res.status === 403) CPM.vertexTokenCache = { token: null, expiry: 0 };
                 return { success: false, content: await res.text() };
             }
-            const data = await res.json();
-            let result = '';
-            if (data.candidates?.[0]?.content?.parts) {
-                for (const part of data.candidates[0].content.parts) {
-                    if (part.thought && config.showThoughtsToken) result += `\n> [Thought Process]\n> ${part.thought}\n\n`;
-                    if ((part.thoughtSignature || part.thought_signature) && config.useThoughtSignature) {
-                        result += `\n> [Signature: ${part.thoughtSignature || part.thought_signature}]\n\n`;
-                    }
-                    if (part.text !== undefined) result += part.text;
-                }
-            }
-            if (!result && data.candidates?.[0]?.finishReason) {
-                let errStr = `[Vertex AI: No text. Finish: ${data.candidates[0].finishReason}]\n`;
-                errStr += `[Raw: ${JSON.stringify(data)}]\n`;
-                if (data.candidates[0].safetyRatings) errStr += `[Safety: ${JSON.stringify(data.candidates[0].safetyRatings)}]`;
-                return { success: false, content: errStr };
-            }
-            if (!result) return { success: false, content: `[Vertex AI: Unknown empty response. Raw: ${JSON.stringify(data)}]` };
-            return { success: true, content: result };
+            return { success: true, content: CPM.createSSEStream(res, (line) => CPM.parseGeminiSSELine(line, config), abortSignal) };
         },
         settingsTab: {
             id: 'tab-vertex',

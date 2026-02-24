@@ -1,6 +1,6 @@
 // @name CPM Provider - Anthropic
-// @version 1.3.4
-// @description Anthropic Claude provider for Cupcake PM
+// @version 1.4.0
+// @description Anthropic Claude provider for Cupcake PM (Streaming)
 // @icon 🟠
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-anthropic.js
 
@@ -77,7 +77,7 @@
                 return null;
             }
         },
-        fetcher: async function (modelDef, messages, temp, maxTokens, args) {
+        fetcher: async function (modelDef, messages, temp, maxTokens, args, abortSignal) {
             const config = {
                 url: await CPM.safeGetArg('cpm_anthropic_url'),
                 key: await CPM.safeGetArg('cpm_anthropic_key'),
@@ -95,6 +95,7 @@
                 max_tokens: maxTokens,
                 temperature: temp,
                 messages: formattedMsgs,
+                stream: true,
             };
             if (args.top_p !== undefined && args.top_p !== null) body.top_p = args.top_p;
             if (args.top_k !== undefined && args.top_k !== null) body.top_k = args.top_k;
@@ -124,15 +125,11 @@
             const res = await Risuai.nativeFetch(url, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'x-api-key': config.key, 'anthropic-version': '2023-06-01' },
-                body: JSON.stringify(body)
+                body: JSON.stringify(body),
+                signal: abortSignal
             });
             if (!res.ok) return { success: false, content: `[Anthropic Error ${res.status}] ${await res.text()}` };
-            const data = await res.json();
-            let result = '';
-            if (Array.isArray(data.content)) {
-                for (const block of data.content) if (block.type === 'text') result += block.text;
-            }
-            return { success: true, content: result };
+            return { success: true, content: CPM.createAnthropicSSEStream(res, abortSignal) };
         },
         settingsTab: {
             id: 'tab-anthropic',

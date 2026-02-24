@@ -1,6 +1,6 @@
 // @name CPM Provider - Gemini Studio
-// @version 1.1.4
-// @description Google Gemini Studio (API Key) provider for Cupcake PM
+// @version 1.2.0
+// @description Google Gemini Studio (API Key) provider for Cupcake PM (Streaming)
 // @icon 🔵
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-gemini.js
 
@@ -62,7 +62,7 @@
                 return null;
             }
         },
-        fetcher: async function (modelDef, messages, temp, maxTokens, args) {
+        fetcher: async function (modelDef, messages, temp, maxTokens, args, abortSignal) {
             const config = {
                 key: await CPM.safeGetArg('cpm_gemini_key'),
                 model: modelDef.id,
@@ -73,7 +73,7 @@
             };
 
             const model = config.model || 'gemini-2.5-flash';
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${config.key}`;
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?key=${config.key}&alt=sse`;
             const { contents, systemInstruction } = CPM.formatToGemini(messages, config);
 
             const body = { contents, generationConfig: { temperature: temp, maxOutputTokens: maxTokens } };
@@ -84,27 +84,9 @@
             if (systemInstruction.length > 0) body.systemInstruction = { parts: systemInstruction.map(text => ({ text })) };
             if (config.thinking && config.thinking !== 'off') body.generationConfig.thinkingConfig = { thinkingBudget: 8192 };
 
-            const res = await Risuai.nativeFetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+            const res = await Risuai.nativeFetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: abortSignal });
             if (!res.ok) return { success: false, content: `[Gemini Error ${res.status}] ${await res.text()}` };
-            const data = await res.json();
-            let result = '';
-            if (data.candidates?.[0]?.content?.parts) {
-                for (const part of data.candidates[0].content.parts) {
-                    if (part.thought && config.showThoughtsToken) result += `\n> [Thought Process]\n> ${part.thought}\n\n`;
-                    if ((part.thoughtSignature || part.thought_signature) && config.useThoughtSignature) {
-                        result += `\n> [Signature: ${part.thoughtSignature || part.thought_signature}]\n\n`;
-                    }
-                    if (part.text !== undefined) result += part.text;
-                }
-            }
-            if (!result && data.candidates?.[0]?.finishReason) {
-                let errStr = `[Google Studio: Response had no text. Finish Reason: ${data.candidates[0].finishReason}]\n`;
-                errStr += `[Raw Data: ${JSON.stringify(data)}]\n`;
-                if (data.candidates[0].safetyRatings) errStr += `[Safety Ratings: ${JSON.stringify(data.candidates[0].safetyRatings)}]`;
-                return { success: false, content: errStr };
-            }
-            if (!result) return { success: false, content: `[Google Studio: Unknown empty response. Raw: ${JSON.stringify(data)}]` };
-            return { success: true, content: result };
+            return { success: true, content: CPM.createSSEStream(res, (line) => CPM.parseGeminiSSELine(line, config), abortSignal) };
         },
         settingsTab: {
             id: 'tab-gemini',

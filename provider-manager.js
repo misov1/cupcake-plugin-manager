@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.6.5
+//@version 1.7.1
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.6.5';
+const CPM_VERSION = '1.7.1';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -534,12 +534,18 @@ window.CupcakePM = {
     formatToOpenAI,
     formatToAnthropic,
     formatToGemini,
+    createSSEStream,
+    parseOpenAISSELine,
+    createAnthropicSSEStream,
+    parseGeminiSSELine,
+    collectStream,
     safeGetArg,
     safeGetBoolArg,
     setArg: (k, v) => risuai.setArgument(k, String(v)),
     get vertexTokenCache() { return vertexTokenCache; },
     set vertexTokenCache(v) { vertexTokenCache = v; },
     AwsV4Signer,
+    checkStreamCapability,
     hotReload: (pluginId) => SubPluginManager.hotReload(pluginId),
     hotReloadAll: () => SubPluginManager.hotReloadAll(),
     /**
@@ -694,10 +700,244 @@ function formatToGemini(messages, config = {}) {
 }
 
 // ==========================================
-// 3. PROVIDER FETCHERS (Custom only - built-in providers are sub-plugins)
+// 3. SSE STREAMING HELPERS
 // ==========================================
 
-async function fetchCustom(config, messages, temp, maxTokens, args = {}) {
+/**
+ * Parse SSE (Server-Sent Events) lines from a ReadableStream<Uint8Array>.
+ * Returns a ReadableStream<string> where each chunk is the delta text.
+ * @param {Response} response - fetch Response with streaming body
+ * @param {function} lineParser - (line: string) => string|null — extracts delta text from an SSE data line
+ * @param {AbortSignal} [abortSignal] - optional abort signal
+ * @returns {ReadableStream<string>}
+ */
+function createSSEStream(response, lineParser, abortSignal) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    return new ReadableStream({
+        async pull(controller) {
+            try {
+                while (true) {
+                    if (abortSignal && abortSignal.aborted) {
+                        reader.cancel();
+                        controller.close();
+                        return;
+                    }
+                    const { done, value } = await reader.read();
+                    if (done) {
+                        // Process remaining buffer
+                        if (buffer.trim()) {
+                            const delta = lineParser(buffer.trim());
+                            if (delta) controller.enqueue(delta);
+                        }
+                        controller.close();
+                        return;
+                    }
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+                    for (const line of lines) {
+                        const trimmed = line.trim();
+                        if (!trimmed || trimmed.startsWith(':')) continue;
+                        const delta = lineParser(trimmed);
+                        if (delta) controller.enqueue(delta);
+                    }
+                }
+            } catch (e) {
+                if (e.name !== 'AbortError') {
+                    controller.error(e);
+                } else {
+                    controller.close();
+                }
+            }
+        },
+        cancel() {
+            reader.cancel();
+        }
+    });
+}
+
+/**
+ * OpenAI-compatible SSE parser: extracts delta.content from "data: {...}" lines.
+ * Works for OpenAI, DeepSeek, OpenRouter, and other OpenAI-compatible APIs.
+ */
+function parseOpenAISSELine(line) {
+    if (!line.startsWith('data:')) return null;
+    const jsonStr = line.slice(5).trim();
+    if (jsonStr === '[DONE]') return null;
+    try {
+        const obj = JSON.parse(jsonStr);
+        return obj.choices?.[0]?.delta?.content || null;
+    } catch { return null; }
+}
+
+/**
+ * Anthropic SSE parser: extracts delta.text from content_block_delta events.
+ * Anthropic SSE format uses "event: ..." + "data: ..." pairs.
+ */
+function createAnthropicSSEStream(response, abortSignal) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let currentEvent = '';
+
+    return new ReadableStream({
+        async pull(controller) {
+            try {
+                while (true) {
+                    if (abortSignal && abortSignal.aborted) {
+                        reader.cancel();
+                        controller.close();
+                        return;
+                    }
+                    const { done, value } = await reader.read();
+                    if (done) { controller.close(); return; }
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+                    for (const line of lines) {
+                        const trimmed = line.trim();
+                        if (!trimmed) { currentEvent = ''; continue; }
+                        if (trimmed.startsWith('event:')) {
+                            currentEvent = trimmed.slice(6).trim();
+                            continue;
+                        }
+                        if (trimmed.startsWith('data:')) {
+                            const jsonStr = trimmed.slice(5).trim();
+                            try {
+                                const obj = JSON.parse(jsonStr);
+                                if (currentEvent === 'content_block_delta' && obj.delta?.text) {
+                                    controller.enqueue(obj.delta.text);
+                                }
+                            } catch {}
+                        }
+                    }
+                }
+            } catch (e) {
+                if (e.name !== 'AbortError') controller.error(e);
+                else controller.close();
+            }
+        },
+        cancel() { reader.cancel(); }
+    });
+}
+
+/**
+ * Gemini SSE parser: extracts text parts from streamed JSON chunks.
+ * Gemini streamGenerateContent with alt=sse returns "data: {...}" lines.
+ */
+function parseGeminiSSELine(line, config = {}) {
+    if (!line.startsWith('data:')) return null;
+    const jsonStr = line.slice(5).trim();
+    try {
+        const obj = JSON.parse(jsonStr);
+        let text = '';
+        if (obj.candidates?.[0]?.content?.parts) {
+            for (const part of obj.candidates[0].content.parts) {
+                if (part.thought && config.showThoughtsToken) text += `\n> [Thought Process]\n> ${part.thought}\n\n`;
+                if ((part.thoughtSignature || part.thought_signature) && config.useThoughtSignature) {
+                    text += `\n> [Signature: ${part.thoughtSignature || part.thought_signature}]\n\n`;
+                }
+                if (part.text !== undefined && !part.thought) text += part.text;
+            }
+        }
+        return text || null;
+    } catch { return null; }
+}
+
+/**
+ * Collect a ReadableStream<string> into a single string.
+ * Used for decoupled streaming mode and as fallback when bridge doesn't support stream transfer.
+ */
+async function collectStream(stream) {
+    const reader = stream.getReader();
+    let result = '';
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) result += value;
+    }
+    return result;
+}
+
+// ==========================================
+// 3.6 STREAM BRIDGE CAPABILITY DETECTION
+// ==========================================
+/**
+ * Detects whether the RisuAI V3 iframe bridge can transfer ReadableStream objects
+ * from the Guest (plugin iframe) to the Host (main window).
+ *
+ * The V3 bridge's Guest-side collectTransferables() may not include ReadableStream,
+ * causing a DataCloneError when postMessage tries to structured-clone the stream.
+ *
+ * Two-phase detection:
+ *   Phase 1 – Check if ReadableStream is structured-cloneable (postMessage WITHOUT transfer list).
+ *             If yes, the bridge works even without a patch.
+ *   Phase 2 – Check if the Guest bridge source code includes ReadableStream in collectTransferables.
+ *             If yes AND the browser supports ReadableStream as Transferable, the bridge is patched.
+ *
+ * The result is cached after the first probe.
+ *
+ * @returns {Promise<boolean>} true if returning a ReadableStream from addProvider callback is safe
+ */
+let _streamBridgeCapable = null;
+async function checkStreamCapability() {
+    if (_streamBridgeCapable !== null) return _streamBridgeCapable;
+
+    // Phase 1: Can the browser structured-clone a ReadableStream? (no transfer list)
+    // This would mean the stream survives postMessage even if the bridge doesn't list it as transferable.
+    try {
+        const s1 = new ReadableStream({ start(c) { c.close(); } });
+        const mc1 = new MessageChannel();
+        const cloneable = await new Promise(resolve => {
+            const timer = setTimeout(() => { resolve(false); try { mc1.port1.close(); mc1.port2.close(); } catch {} }, 500);
+            mc1.port2.onmessage = () => { clearTimeout(timer); resolve(true); mc1.port1.close(); mc1.port2.close(); };
+            mc1.port2.onmessageerror = () => { clearTimeout(timer); resolve(false); mc1.port1.close(); mc1.port2.close(); };
+            try { mc1.port1.postMessage({ s: s1 }); } // NO transfer list
+            catch { clearTimeout(timer); resolve(false); }
+        });
+        if (cloneable) {
+            _streamBridgeCapable = true;
+            console.log('[CupcakePM] ReadableStream is structured-cloneable — streaming enabled.');
+            return true;
+        }
+    } catch { /* continue to Phase 2 */ }
+
+    // Phase 2: Check if the Guest bridge's collectTransferables includes ReadableStream.
+    // The bridge script is embedded in this iframe's <script> tag.
+    try {
+        const scriptContent = document.querySelector('script')?.textContent || '';
+        const ctFnMatch = scriptContent.match(/function\s+collectTransferables\b[\s\S]{0,800}?return\s+transferables/);
+        if (ctFnMatch && ctFnMatch[0].includes('ReadableStream')) {
+            // Bridge is patched. Verify the browser can actually transfer ReadableStream.
+            const s2 = new ReadableStream({ start(c) { c.close(); } });
+            const mc2 = new MessageChannel();
+            const transferable = await new Promise(resolve => {
+                const timer = setTimeout(() => { resolve(false); try { mc2.port1.close(); mc2.port2.close(); } catch {} }, 500);
+                mc2.port2.onmessage = () => { clearTimeout(timer); resolve(true); mc2.port1.close(); mc2.port2.close(); };
+                try { mc2.port1.postMessage({ s: s2 }, [s2]); } // WITH transfer list
+                catch { clearTimeout(timer); resolve(false); }
+            });
+            if (transferable) {
+                _streamBridgeCapable = true;
+                console.log('[CupcakePM] Guest bridge patched + browser supports transfer — streaming enabled.');
+                return true;
+            }
+        }
+    } catch { /* continue to fallback */ }
+
+    _streamBridgeCapable = false;
+    console.log('[CupcakePM] ReadableStream transfer NOT supported by bridge. Falling back to string responses.');
+    return false;
+}
+
+// ==========================================
+// 3.7 PROVIDER FETCHERS (Custom only - built-in providers are sub-plugins)
+// ==========================================
+
+async function fetchCustom(config, messages, temp, maxTokens, args = {}, abortSignal) {
     const format = config.format || 'openai';
     let formattedMessages;
     let systemPrompt = '';
@@ -795,10 +1035,49 @@ async function fetchCustom(config, messages, temp, maxTokens, args = {}) {
         headers['Editor-Plugin-Version'] = 'copilot-chat/0.11.1';
     }
 
+    // --- Streaming support ---
+    const useStreaming = !config.decoupled;
+
+    if (useStreaming) {
+        // Build streaming request
+        const streamBody = { ...body };
+        let streamUrl = config.url;
+
+        if (format === 'anthropic') {
+            streamBody.stream = true;
+        } else if (format === 'google') {
+            // Switch endpoint to streamGenerateContent
+            streamUrl = config.url.replace(':generateContent', ':streamGenerateContent');
+            if (!streamUrl.includes('alt=')) streamUrl += (streamUrl.includes('?') ? '&' : '?') + 'alt=sse';
+        } else {
+            // OpenAI-compatible
+            streamBody.stream = true;
+        }
+
+        const res = await Risuai.nativeFetch(streamUrl, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(streamBody),
+            signal: abortSignal
+        });
+
+        if (!res.ok) return { success: false, content: `[Custom API Error ${res.status}] ${await res.text()}` };
+
+        if (format === 'anthropic') {
+            return { success: true, content: createAnthropicSSEStream(res, abortSignal) };
+        } else if (format === 'google') {
+            return { success: true, content: createSSEStream(res, (line) => parseGeminiSSELine(line, config), abortSignal) };
+        } else {
+            return { success: true, content: createSSEStream(res, parseOpenAISSELine, abortSignal) };
+        }
+    }
+
+    // --- Non-streaming (decoupled) fallback ---
     const res = await Risuai.nativeFetch(config.url, {
         method: 'POST',
         headers,
-        body: JSON.stringify(body)
+        body: JSON.stringify(body),
+        signal: abortSignal
     });
 
     if (!res.ok) return { success: false, content: `[Custom API Error ${res.status}] ${await res.text()}` };
@@ -826,7 +1105,7 @@ async function fetchCustom(config, messages, temp, maxTokens, args = {}) {
 // 4. MAIN ROUTER
 // ==========================================
 
-async function fetchByProviderId(modelDef, args) {
+async function fetchByProviderId(modelDef, args, abortSignal) {
     const temp = args.temperature || 0.7;
     const maxTokens = args.max_tokens || 4096;
     const messages = args.prompt_chat || [];
@@ -835,7 +1114,7 @@ async function fetchByProviderId(modelDef, args) {
         // Dynamic provider lookup from registered sub-plugins
         const fetcher = customFetchers[modelDef.provider];
         if (fetcher) {
-            return await fetcher(modelDef, messages, temp, maxTokens, args);
+            return await fetcher(modelDef, messages, temp, maxTokens, args, abortSignal);
         }
 
         // Custom Models Manager (built-in)
@@ -852,7 +1131,7 @@ async function fetchByProviderId(modelDef, args) {
                 thinking_level: cDef.thinking || 'none', tok: cDef.tok || 'o200k_base',
                 decoupled: !!cDef.decoupled, thought: !!cDef.thought,
                 customParams: cDef.customParams || '', copilotToken: args.copilot_token || ''
-            }, messages, temp, maxTokens, args);
+            }, messages, temp, maxTokens, args, abortSignal);
         }
         return { success: false, content: `[Cupcake PM] Unknown provider selected: ${modelDef.provider}` };
     } catch (e) {
@@ -860,7 +1139,7 @@ async function fetchByProviderId(modelDef, args) {
     }
 }
 
-async function handleRequest(args, activeModelDef) {
+async function handleRequest(args, activeModelDef, abortSignal) {
     const slot = mapModeToSlot(args.mode);
 
     // If it's the main chat slot, route to the provider that the UI initiated this call for
@@ -898,7 +1177,20 @@ async function handleRequest(args, activeModelDef) {
         if (presPen) args.presence_penalty = parseFloat(presPen);
     }
 
-    return await fetchByProviderId(targetDef, args);
+    const result = await fetchByProviderId(targetDef, args, abortSignal);
+
+    // Stream bridge fallback: if the result contains a ReadableStream but the
+    // iframe bridge can't transfer it, consume the stream into a plain string.
+    // This avoids DataCloneError while keeping the streaming code path intact.
+    // When RisuAI patches the Guest bridge, this automatically enables real streaming.
+    if (result && result.success && result.content instanceof ReadableStream) {
+        const canStream = await checkStreamCapability();
+        if (!canStream) {
+            result.content = await collectStream(result.content);
+        }
+    }
+
+    return result;
 }
 
 // ==========================================
@@ -1044,9 +1336,9 @@ async function handleRequest(args, activeModelDef) {
         for (const modelDef of ALL_DEFINED_MODELS) {
             let pLabel = modelDef.provider;
             let mLabel = modelDef.name;
-            await Risuai.addProvider(`[Cupcake PM] [${pLabel}] ${mLabel}`, async (args) => {
+            await Risuai.addProvider(`[Cupcake PM] [${pLabel}] ${mLabel}`, async (args, abortSignal) => {
                 try {
-                    return await handleRequest(args, modelDef);
+                    return await handleRequest(args, modelDef, abortSignal);
                 } catch (err) {
                     return { success: false, content: `[Cupcake SDK Fallback Crash] ${err.message}` };
                 }

@@ -1,6 +1,6 @@
 // @name CPM Provider - DeepSeek
-// @version 1.1.4
-// @description DeepSeek provider for Cupcake PM
+// @version 1.2.0
+// @description DeepSeek provider for Cupcake PM (Streaming)
 // @icon 🟣
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-deepseek.js
 
@@ -39,7 +39,7 @@
                 return null;
             }
         },
-        fetcher: async function (modelDef, messages, temp, maxTokens, args) {
+        fetcher: async function (modelDef, messages, temp, maxTokens, args, abortSignal) {
             const config = {
                 url: await CPM.safeGetArg('cpm_deepseek_url'),
                 key: await CPM.safeGetArg('cpm_deepseek_key'),
@@ -47,7 +47,7 @@
             };
 
             const url = config.url || 'https://api.deepseek.com/v1/chat/completions';
-            const body = { model: config.model || 'deepseek-chat', messages: CPM.formatToOpenAI(messages), temperature: temp, max_tokens: maxTokens };
+            const body = { model: config.model || 'deepseek-chat', messages: CPM.formatToOpenAI(messages), temperature: temp, max_tokens: maxTokens, stream: true };
             if (args.top_p !== undefined && args.top_p !== null) body.top_p = args.top_p;
             if (args.frequency_penalty !== undefined && args.frequency_penalty !== null) body.frequency_penalty = args.frequency_penalty;
             if (args.presence_penalty !== undefined && args.presence_penalty !== null) body.presence_penalty = args.presence_penalty;
@@ -55,11 +55,11 @@
             const res = await Risuai.nativeFetch(url, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.key}` },
-                body: JSON.stringify(body)
+                body: JSON.stringify(body),
+                signal: abortSignal
             });
             if (!res.ok) return { success: false, content: await res.text() };
-            const data = await res.json();
-            return { success: true, content: data.choices?.[0]?.message?.content || '' };
+            return { success: true, content: CPM.createSSEStream(res, CPM.parseOpenAISSELine, abortSignal) };
         },
         settingsTab: {
             id: 'tab-deepseek',

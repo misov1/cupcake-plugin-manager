@@ -1,6 +1,6 @@
 // @name CPM Provider - OpenRouter
-// @version 1.0.5
-// @description OpenRouter provider for Cupcake PM
+// @version 1.1.0
+// @description OpenRouter provider for Cupcake PM (Streaming)
 // @icon 🌐
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-openrouter.js
 
@@ -13,7 +13,7 @@
         models: [
             { uniqueId: 'openrouter-dynamic', id: 'openrouter', name: 'OpenRouter (Set inside PM config)' },
         ],
-        fetcher: async function (modelDef, messages, temp, maxTokens, args) {
+        fetcher: async function (modelDef, messages, temp, maxTokens, args, abortSignal) {
             const config = {
                 url: await CPM.safeGetArg('cpm_openrouter_url'),
                 key: await CPM.safeGetArg('cpm_openrouter_key'),
@@ -23,7 +23,7 @@
             };
 
             const url = config.url || 'https://openrouter.ai/api/v1/chat/completions';
-            const body = { model: config.model, messages: CPM.formatToOpenAI(messages), temperature: temp, max_tokens: maxTokens };
+            const body = { model: config.model, messages: CPM.formatToOpenAI(messages), temperature: temp, max_tokens: maxTokens, stream: true };
             if (args.top_p !== undefined && args.top_p !== null) body.top_p = args.top_p;
             if (args.top_k !== undefined && args.top_k !== null) body.top_k = args.top_k;
             if (args.frequency_penalty !== undefined && args.frequency_penalty !== null) body.frequency_penalty = args.frequency_penalty;
@@ -44,11 +44,11 @@
                     'HTTP-Referer': 'https://risuai.xyz',
                     'X-Title': 'RisuAI - CPM'
                 },
-                body: JSON.stringify(body)
+                body: JSON.stringify(body),
+                signal: abortSignal
             });
             if (!res.ok) return { success: false, content: await res.text() };
-            const data = await res.json();
-            return { success: true, content: data.choices?.[0]?.message?.content || '' };
+            return { success: true, content: CPM.createSSEStream(res, CPM.parseOpenAISSELine, abortSignal) };
         },
         settingsTab: {
             id: 'tab-openrouter',

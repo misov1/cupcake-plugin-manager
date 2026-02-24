@@ -1,6 +1,6 @@
 // @name CPM Provider - AWS Bedrock
-// @version 1.2.3
-// @description AWS Bedrock (Claude) provider for Cupcake PM
+// @version 1.3.0
+// @description AWS Bedrock (Claude) provider for Cupcake PM (Streaming)
 // @icon 🔶
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-aws.js
 
@@ -115,7 +115,7 @@
                 return null;
             }
         },
-        fetcher: async function (modelDef, messages, temp, maxTokens, args) {
+        fetcher: async function (modelDef, messages, temp, maxTokens, args, abortSignal) {
             const config = {
                 key: await CPM.safeGetArg('cpm_aws_key'),
                 secret: await CPM.safeGetArg('cpm_aws_secret'),
@@ -158,33 +158,86 @@
 
             try {
                 const AwsV4Signer = CPM.AwsV4Signer;
+                const streamUrl = `https://bedrock-runtime.${config.region}.amazonaws.com/model/${config.model}/invoke-with-response-stream`;
                 const signer = new AwsV4Signer({
                     method: 'POST',
-                    url: `https://bedrock-runtime.${config.region}.amazonaws.com/model/${config.model}/invoke`,
+                    url: streamUrl,
                     accessKeyId: config.key,
                     secretAccessKey: config.secret,
                     service: 'bedrock',
                     region: config.region,
                     body: JSON.stringify(body),
-                    headers: { 'Content-Type': 'application/json', 'accept': 'application/json' }
+                    headers: { 'Content-Type': 'application/json', 'accept': 'application/vnd.amazon.eventstream' }
                 });
 
                 const signed = await signer.sign();
                 const res = await Risuai.nativeFetch(signed.url.toString(), {
                     method: signed.method,
                     headers: signed.headers,
-                    body: signed.body
+                    body: signed.body,
+                    signal: abortSignal
                 });
 
                 if (!res.ok) return { success: false, content: `[AWS Bedrock Error ${res.status}] ${await res.text()}` };
-                const data = await res.json();
-                let result = '';
-                if (Array.isArray(data.content)) {
-                    for (const block of data.content) {
-                        if (block.type === 'text') result += block.text;
-                    }
-                }
-                return { success: true, content: result };
+
+                // AWS Bedrock invoke-with-response-stream returns event stream format.
+                // Parse it to extract content_block_delta text chunks.
+                const reader = res.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                const stream = new ReadableStream({
+                    async pull(controller) {
+                        try {
+                            while (true) {
+                                if (abortSignal && abortSignal.aborted) {
+                                    reader.cancel();
+                                    controller.close();
+                                    return;
+                                }
+                                const { done, value } = await reader.read();
+                                if (done) { controller.close(); return; }
+                                buffer += decoder.decode(value, { stream: true });
+                                // AWS eventstream wraps JSON payloads; extract them
+                                // The response contains base64-encoded JSON events or raw JSON chunks
+                                const lines = buffer.split('\n');
+                                buffer = lines.pop() || '';
+                                for (const line of lines) {
+                                    const trimmed = line.trim();
+                                    if (!trimmed) continue;
+                                    try {
+                                        // Try to parse as JSON directly (Bedrock may send raw JSON events)
+                                        const obj = JSON.parse(trimmed);
+                                        if (obj.bytes) {
+                                            // Base64 encoded event payload
+                                            const decoded = JSON.parse(atob(obj.bytes));
+                                            if (decoded.type === 'content_block_delta' && decoded.delta?.text) {
+                                                controller.enqueue(decoded.delta.text);
+                                            }
+                                        } else if (obj.type === 'content_block_delta' && obj.delta?.text) {
+                                            controller.enqueue(obj.delta.text);
+                                        }
+                                    } catch {
+                                        // Try extracting JSON from binary event stream format
+                                        // Look for content_block_delta patterns
+                                        const deltaMatch = trimmed.match(/"type"\s*:\s*"content_block_delta"[^}]*"delta"\s*:\s*\{[^}]*"text"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+                                        if (deltaMatch) {
+                                            try {
+                                                controller.enqueue(JSON.parse('"' + deltaMatch[1] + '"'));
+                                            } catch {}
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (e) {
+                            if (e.name !== 'AbortError') controller.error(e);
+                            else controller.close();
+                        }
+                    },
+                    cancel() { reader.cancel(); }
+                });
+
+                return { success: true, content: stream };
             } catch (e) {
                 return { success: false, content: `[AWS Bedrock Exception] ${e.message}` };
             }
