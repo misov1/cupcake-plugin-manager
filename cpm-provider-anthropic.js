@@ -1,5 +1,5 @@
 // @name CPM Provider - Anthropic
-// @version 1.1.0
+// @version 1.1.1
 // @description Anthropic Claude provider for Cupcake PM
 // @icon 🟠
 
