@@ -1,7 +1,7 @@
 //@name CPM Component - Copilot Token Manager
 //@display-name Cupcake Copilot Manager
 //@api 3.0
-//@version 1.1.3
+//@version 1.1.4
 //@author Cupcake
 //@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-copilot-manager.js
 
@@ -127,17 +127,26 @@
     async function checkQuota(token) {
         const tidData = await getTidToken(token);
         const quotaInfo = { plan: tidData.sku || 'unknown' };
-        // Decode JWT
+        // Decode JWT (base64url → base64, add padding)
         try {
             const parts = tidData.token.split('.');
             if (parts.length >= 2) {
-                const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
-                quotaInfo.payload = payload;
-                if (payload.chat) quotaInfo.chat = payload.chat;
-                if (payload.rt) quotaInfo.rateLimit = payload.rt;
-                if (payload.sku) quotaInfo.plan = payload.sku;
-                for (const [k, v] of Object.entries(payload)) {
-                    if (k.includes('limit') || k.includes('quota') || k.includes('rate') || k.includes('usage') || k.includes('premium')) quotaInfo[k] = v;
+                let b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+                // Add padding if missing
+                while (b64.length % 4 !== 0) b64 += '=';
+                const decoded = atob(b64);
+                // Only try JSON.parse if it looks like JSON (starts with '{')
+                if (decoded.charAt(0) === '{') {
+                    const payload = JSON.parse(decoded);
+                    quotaInfo.payload = payload;
+                    if (payload.chat) quotaInfo.chat = payload.chat;
+                    if (payload.rt) quotaInfo.rateLimit = payload.rt;
+                    if (payload.sku) quotaInfo.plan = payload.sku;
+                    for (const [k, v] of Object.entries(payload)) {
+                        if (k.includes('limit') || k.includes('quota') || k.includes('rate') || k.includes('usage') || k.includes('premium')) quotaInfo[k] = v;
+                    }
+                } else {
+                    console.log(LOG_TAG, 'JWT payload is not JSON (likely encrypted), skipping decode.');
                 }
             }
         } catch (e) { console.warn(LOG_TAG, 'JWT decode partial failure:', e); }
@@ -388,13 +397,13 @@
     actions.autoConfig = async () => {
         const token = await getToken();
         if (!token) { showError('저장된 토큰이 없습니다. 먼저 토큰을 생성하세요.'); return; }
-        if (!confirm(`GitHub Copilot 자동 설정을 진행하시겠습니까?\n\nCustom Model에 다음 설정이 추가됩니다:\n  URL: https://api.githubcopilot.com/chat/completions\n  모델: claude-sonnet-4-20250514\n  포맷: OpenAI`)) return;
+        if (!confirm(`GitHub Copilot 자동 설정을 진행하시겠습니까?\n\nCustom Model에 다음 설정이 추가됩니다:\n  URL: https://api.githubcopilot.com/chat/completions\n  모델: gpt-4.1\n  포맷: OpenAI`)) return;
         toast('자동 설정 안내를 확인하세요.');
         showSuccess(`<strong>⚙️ 자동 설정 안내</strong>
             <p class="mt-2 text-sm">Copilot을 사용하려면 Provider Manager에서 Custom Model을 추가하세요:</p>
             <div class="bg-gray-900 rounded p-3 mt-2 text-xs font-mono text-gray-300 space-y-1">
                 <div><strong>URL:</strong> https://api.githubcopilot.com/chat/completions</div>
-                <div><strong>모델:</strong> claude-sonnet-4-20250514</div>
+                <div><strong>모델:</strong> gpt-4.1</div>
                 <div><strong>Key:</strong> 토큰은 tools_githubCopilotToken 에 자동 저장됩니다.</div>
             </div>`);
     };

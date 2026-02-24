@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.6.3
+//@version 1.6.4
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.6.3';
+const CPM_VERSION = '1.6.4';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -113,6 +113,20 @@ let vertexTokenCache = { token: null, expiry: 0 };
 const pendingDynamicFetchers = [];
 let _currentExecutingPluginId = null;
 const _pluginRegistrations = {}; // pluginId -> { providerNames: [], tabObjects: [], fetcherEntries: [] }
+
+// Helper: Check if dynamic model fetching is enabled for a given provider
+// Setting key: cpm_dynamic_<providerName_lowercase> = 'true' means fetch from server
+// Default: false — only fetch when user explicitly checks the checkbox
+async function isDynamicFetchEnabled(providerName) {
+    const key = `cpm_dynamic_${providerName.toLowerCase()}`;
+    try {
+        const val = await safeGetArg(key);
+        // Only treat explicitly 'true' as enabled
+        return (val === 'true' || val === true);
+    } catch {
+        return false;
+    }
+}
 
 // ==========================================
 // 3.1 PERSISTENT SETTINGS BACKUP (survives plugin deletion)
@@ -913,14 +927,6 @@ async function handleRequest(args, activeModelDef) {
         if (restoredCount > 0) {
             console.log(`[CPM] Auto-restored ${restoredCount} settings from persistent backup.`);
         }
-
-// Helper: Check if dynamic model fetching is enabled for a given provider
-// Setting key: cpm_dynamic_<providerName_lowercase> = 'true' means fetch from server
-// Default: false — only fetch when user explicitly checks the checkbox
-async function isDynamicFetchEnabled(providerName) {
-    const key = `cpm_dynamic_${providerName.toLowerCase()}`;
-    return await safeGetBoolArg(key, false);
-}
 
         // ===== Dynamic Model Fetching (공식 API에서 모델 목록 자동 갱신) =====
         for (const { name, fetchDynamicModels } of pendingDynamicFetchers) {
