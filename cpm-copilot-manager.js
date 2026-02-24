@@ -1,7 +1,7 @@
 //@name CPM Component - Copilot Token Manager
 //@display-name Cupcake Copilot Manager
 //@api 3.0
-//@version 1.2.2
+//@version 1.2.3
 //@author Cupcake
 //@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-copilot-manager.js
 
@@ -70,114 +70,78 @@
     }
 
     // ==========================================
-    // SMART FETCH: Multi-strategy approach
+    // SMART FETCH: Uses risuFetch with plainFetchDeforce
     //
     // V3 plugins run in sandboxed iframe; all API calls go through RPC bridge.
     //
-    // - Risuai.risuFetch = globalFetch (supports plainFetchForce option)
-    // - Risuai.nativeFetch = fetchNative (proxy on web, Rust HTTP on Tauri)
+    // - Risuai.risuFetch = globalFetch (supports plainFetchDeforce option)
     //
-    // Problem: RisuAI web proxy (sv.risuai.xyz/proxy2) returns 401.
-    // Solution: Use risuFetch with plainFetchForce to bypass proxy and
-    //           make direct fetch() from the parent frame. GitHub API
-    //           supports CORS from any origin.
+    // LBI v2 approach (proven working):
+    //   risuFetch + plainFetchDeforce: true → forces proxy/Tauri route
+    //   This ensures proper risu-header/risu-url encoding for the proxy,
+    //   bypassing CORS issues and Header serialization problems in V3 iframe.
     //
-    // Strategy order:
-    //   1. risuFetch + plainFetchForce (direct fetch, bypasses proxy)
-    //   2. nativeFetch (Tauri native / proxy fallback)
-    //   3. Error with guidance
+    // body is passed as a plain object (risuFetch handles JSON.stringify).
+    // rawResponse: false → returns parsed JSON in result.data.
     // ==========================================
-    function wrapGlobalFetchResult(result) {
-        const bodyStr = typeof result.data === 'string' ? result.data : JSON.stringify(result.data);
-        return new Response(bodyStr, {
-            status: result.status || (result.ok ? 200 : 400),
-            headers: new Headers(result.headers || {}),
-        });
-    }
 
     /**
-     * Determine if a globalFetch result represents a real HTTP response
-     * (even an error like 401/403) vs a network/CORS failure.
-     * Network failures return { ok:false, data:"TypeError:...", headers:{}, status:400 }
+     * Wrap risuFetch result ({ ok, data, headers, status }) into a
+     * Response-like object so callers can use .ok, .json(), .text(), .status.
      */
-    function isRealHttpResponse(result) {
-        // If we got real HTTP headers, it's a genuine API response
-        if (result.headers && Object.keys(result.headers).length > 0) return true;
-        // Status other than the default 400 means a real response
-        if (result.status && result.status !== 400) return true;
-        // If data is a parsed object (not an error string), it's a real response
-        if (result.data && typeof result.data === 'object') return true;
-        return false;
+    function wrapRisuFetchResult(result) {
+        const ok = !!result.ok;
+        const status = result.status || (ok ? 200 : 400);
+        const data = result.data;
+        const headers = result.headers || {};
+
+        return {
+            ok,
+            status,
+            headers,
+            async json() {
+                if (typeof data === 'object') return data;
+                if (typeof data === 'string') return JSON.parse(data);
+                return data;
+            },
+            async text() {
+                if (typeof data === 'string') return data;
+                return JSON.stringify(data);
+            },
+        };
     }
 
     async function copilotFetch(url, options = {}) {
         const Risu = window.Risuai || window.risuai;
+        const method = options.method || (url.includes('github.com/login/') ? 'POST' : 'GET');
+        const headers = options.headers || {};
 
-        // OAuth endpoints: must go through proxy/Tauri (github.com/login/* has no CORS)
-        if (url.includes('github.com/login/')) {
-            // Try risuFetch without plainFetchForce → routes through proxy/Tauri
+        // Parse body: callers pass JSON string, but risuFetch needs a plain object
+        let body = undefined;
+        if (options.body) {
             try {
-                const result = await Risu.risuFetch(url, {
-                    method: options.method || 'POST',
-                    headers: options.headers || {},
-                    body: options.body ? JSON.parse(options.body) : undefined,
-                });
-                return wrapGlobalFetchResult(result);
+                body = typeof options.body === 'string' ? JSON.parse(options.body) : options.body;
             } catch (e) {
-                console.log(LOG_TAG, 'risuFetch for OAuth failed:', e.message);
+                body = options.body;
             }
-            // Fallback to nativeFetch for OAuth
-            return await Risu.nativeFetch(url, options);
         }
 
-        // --- Strategy 1: risuFetch + plainFetchForce ---
-        // Direct fetch() from parent frame → bypasses broken proxy.
-        // GitHub API (api.github.com) supports CORS from any origin.
         try {
-            console.log(LOG_TAG, `Trying direct fetch for ${url.substring(0, 80)}...`);
+            console.log(LOG_TAG, `risuFetch (plainFetchDeforce) for ${url.substring(0, 80)}...`);
             const result = await Risu.risuFetch(url, {
-                method: options.method || 'GET',
-                headers: options.headers || {},
-                body: options.body ? JSON.parse(options.body) : undefined,
-                plainFetchForce: true,
+                method,
+                headers,
+                body,
+                rawResponse: false,
+                plainFetchDeforce: true,
             });
-            // If we got a real HTTP response (success or API error), use it
-            if (isRealHttpResponse(result)) {
-                console.log(LOG_TAG, `Direct fetch returned status=${result.status}`);
-                return wrapGlobalFetchResult(result);
-            }
-            // Network/CORS failure → fall through to next strategy
-            console.log(LOG_TAG, `Direct fetch failed (network/CORS): ${typeof result.data === 'string' ? result.data.substring(0, 100) : 'unknown'}`);
+            console.log(LOG_TAG, `risuFetch returned ok=${result.ok}, status=${result.status}`);
+            return wrapRisuFetchResult(result);
         } catch (e) {
-            console.log(LOG_TAG, 'Direct fetch exception:', e.message);
+            console.error(LOG_TAG, 'risuFetch (plainFetchDeforce) failed:', e.message);
         }
 
-        // --- Strategy 2: nativeFetch (Tauri native / proxy fallback) ---
-        try {
-            console.log(LOG_TAG, `Trying nativeFetch for ${url.substring(0, 80)}...`);
-            const res = await Risu.nativeFetch(url, options);
-            return res;
-        } catch (e) {
-            console.log(LOG_TAG, 'nativeFetch exception:', e.message);
-        }
-
-        // --- Strategy 3: risuFetch without plainFetchForce (proxy/Tauri via globalFetch) ---
-        try {
-            console.log(LOG_TAG, `Trying risuFetch (proxy) for ${url.substring(0, 80)}...`);
-            const result = await Risu.risuFetch(url, {
-                method: options.method || 'GET',
-                headers: options.headers || {},
-                body: options.body ? JSON.parse(options.body) : undefined,
-            });
-            if (isRealHttpResponse(result)) {
-                return wrapGlobalFetchResult(result);
-            }
-        } catch (e) {
-            console.log(LOG_TAG, 'risuFetch (proxy) exception:', e.message);
-        }
-
-        // --- All strategies exhausted ---
-        throw new Error('네트워크 요청 실패: 모든 요청 방식이 실패했습니다. RisuAI 데스크탑 앱을 사용하거나, RisuAI 설정 → 기타 봇 설정 → "Use plain fetch instead of server" 를 활성화해 보세요.');
+        throw new Error('네트워크 요청 실패: risuFetch 요청이 실패했습니다. RisuAI 데스크탑 앱을 사용하거나, 네트워크 연결을 확인해 보세요.');
     }
 
     // ==========================================
@@ -630,5 +594,5 @@
         }
     });
 
-    console.log(`${LOG_TAG} Settings tab registered (v1.2.2) — sidebar: 🔑 Copilot`);
+    console.log(`${LOG_TAG} Settings tab registered (v1.2.3) — sidebar: 🔑 Copilot`);
 })();
