@@ -1,5 +1,5 @@
 // @name CPM Provider - Anthropic
-// @version 1.3.4
+// @version 1.2.3
 // @description Anthropic Claude provider for Cupcake PM
 // @icon 🟠
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-anthropic.js
@@ -38,45 +38,6 @@
     CPM.registerProvider({
         name: 'Anthropic',
         models,
-        fetchDynamicModels: async () => {
-            try {
-                const key = await CPM.safeGetArg('cpm_anthropic_key');
-                if (!key) return null;
-
-                let allModels = [];
-                let afterId = null;
-
-                // Paginate through all available models
-                while (true) {
-                    let url = 'https://api.anthropic.com/v1/models?limit=100';
-                    if (afterId) url += `&after_id=${encodeURIComponent(afterId)}`;
-
-                    const res = await CPM.smartFetch(url, {
-                        method: 'GET',
-                        headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' }
-                    });
-                    if (!res.ok) return null;
-
-                    const data = await res.json();
-                    if (data.data) allModels = allModels.concat(data.data);
-                    if (!data.has_more) break;
-                    afterId = data.last_id;
-                }
-
-                return allModels
-                    .filter(m => m.type === 'model')
-                    .map(m => {
-                        let name = m.display_name || m.id;
-                        // Append date suffix if present (e.g., "20251001" -> "2025/10/01")
-                        const dateMatch = m.id.match(/(\d{4})(\d{2})(\d{2})$/);
-                        if (dateMatch) name += ` (${dateMatch[1]}/${dateMatch[2]}/${dateMatch[3]})`;
-                        return { uniqueId: `anthropic-${m.id}`, id: m.id, name };
-                    });
-            } catch (e) {
-                console.warn('[CPM-Anthropic] Dynamic model fetch error:', e);
-                return null;
-            }
-        },
         fetcher: async function (modelDef, messages, temp, maxTokens, args) {
             const config = {
                 url: await CPM.safeGetArg('cpm_anthropic_url'),
@@ -138,12 +99,11 @@
             id: 'tab-anthropic',
             icon: '🟠',
             label: 'Anthropic',
-            exportKeys: ['cpm_anthropic_key', 'cpm_anthropic_thinking_budget', 'cpm_anthropic_thinking_effort', 'chat_claude_caching', 'cpm_anthropic_url', 'cpm_dynamic_anthropic'],
+            exportKeys: ['cpm_anthropic_key', 'cpm_anthropic_thinking_budget', 'cpm_anthropic_thinking_effort', 'chat_claude_caching', 'cpm_anthropic_url'],
             renderContent: async (renderInput, lists) => {
                 return `
                     <h3 class="text-3xl font-bold text-orange-400 mb-6 pb-3 border-b border-gray-700">Anthropic Configuration (설정)</h3>
                     ${await renderInput('cpm_anthropic_key', 'API Key (API 키)', 'password')}
-                    ${await renderInput('cpm_dynamic_anthropic', '📡 서버에서 모델 목록 불러오기 (Fetch models from API)', 'checkbox')}
                     ${await renderInput('cpm_anthropic_thinking_budget', 'Thinking Budget Tokens (생각 토큰 예산 - 4.5 이하 모델용, 0은 끄기)', 'number')}
                     ${await renderInput('cpm_anthropic_thinking_effort', 'Adaptive Thinking Effort (4.6 모델용: low/medium/high/max)')}
                     ${await renderInput('chat_claude_caching', 'Cache Enabled (프롬프트 캐싱 사용)', 'checkbox')}

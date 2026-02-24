@@ -1,7 +1,7 @@
 //@name CPM Component - Copilot Token Manager
 //@display-name Cupcake Copilot Manager
 //@api 3.0
-//@version 1.1.2
+//@version 1.1.3
 //@author Cupcake
 //@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-copilot-manager.js
 
@@ -195,6 +195,18 @@
     // ACTION HANDLERS (exposed on window for inline onclick)
     // ==========================================
     const actions = {};
+
+    actions.manualSave = async () => {
+        const input = document.getElementById(`${PREFIX}-manual-input`);
+        if (!input) return;
+        const val = input.value.trim();
+        if (!val) { toast('토큰을 입력하세요.'); return; }
+        setToken(val);
+        input.value = '';
+        await refreshTokenDisplay();
+        toast('토큰이 저장되었습니다.');
+        showSuccess('<strong>✅ 성공!</strong> 직접 입력한 토큰이 저장되었습니다.');
+    };
 
     actions.copyToken = async () => {
         const token = await getToken();
@@ -417,12 +429,22 @@
                     </p>
 
                     <!-- Current Token Display -->
-                    <div class="mb-6">
+                    <div class="mb-4">
                         <label class="block text-sm font-medium text-gray-400 mb-2">현재 저장된 토큰</label>
                         <div class="flex items-center space-x-2">
                             <div id="${PREFIX}-token-display" class="flex-1 bg-gray-800 border border-gray-600 rounded px-3 py-2 text-gray-300 font-mono text-sm select-all truncate">${escapeHtml(masked)}</div>
                             <button onclick="window._cpmCopilot.copyToken()" class="bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded text-sm font-bold shrink-0" title="토큰 복사">📋 복사</button>
                         </div>
+                    </div>
+
+                    <!-- Manual Token Input -->
+                    <div class="mb-6">
+                        <label class="block text-sm font-medium text-gray-400 mb-2">토큰 직접 입력</label>
+                        <div class="flex items-center space-x-2">
+                            <input id="${PREFIX}-manual-input" type="text" placeholder="ghu_xxxx 또는 gho_xxxx 토큰을 붙여넣기..." class="flex-1 bg-gray-800 border border-gray-600 rounded px-3 py-2 text-gray-200 font-mono text-sm focus:border-blue-500 focus:outline-none" />
+                            <button onclick="window._cpmCopilot.manualSave()" class="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded text-sm font-bold shrink-0">💾 저장</button>
+                        </div>
+                        <p class="text-gray-500 text-xs mt-1">GitHub에서 직접 발급받은 토큰을 수동으로 입력할 수 있습니다.</p>
                     </div>
 
                     <!-- Action Buttons Grid -->

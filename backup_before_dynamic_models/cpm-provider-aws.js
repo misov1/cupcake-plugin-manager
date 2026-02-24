@@ -1,5 +1,5 @@
 // @name CPM Provider - AWS Bedrock
-// @version 1.2.3
+// @version 1.1.2
 // @description AWS Bedrock (Claude) provider for Cupcake PM
 // @icon 🔶
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-aws.js
@@ -25,96 +25,6 @@
     CPM.registerProvider({
         name: 'AWS',
         models: AWS_MODELS,
-        fetchDynamicModels: async () => {
-            try {
-                const key = await CPM.safeGetArg('cpm_aws_key');
-                const secret = await CPM.safeGetArg('cpm_aws_secret');
-                const region = await CPM.safeGetArg('cpm_aws_region');
-                if (!key || !secret || !region) return null;
-
-                const AwsV4Signer = CPM.AwsV4Signer;
-                const url = `https://bedrock.${region}.amazonaws.com/foundation-models`;
-                const signer = new AwsV4Signer({
-                    method: 'GET',
-                    url: url,
-                    accessKeyId: key,
-                    secretAccessKey: secret,
-                    service: 'bedrock',
-                    region: region,
-                });
-                const signed = await signer.sign();
-                const res = await Risuai.nativeFetch(signed.url.toString(), {
-                    method: signed.method,
-                    headers: signed.headers,
-                });
-                if (!res.ok) return null;
-
-                const data = await res.json();
-                if (!data.modelSummaries) return null;
-
-                // Filter to text-generation capable models (Claude, Llama, Mistral, etc.)
-                const results = [];
-                for (const m of data.modelSummaries) {
-                    const id = m.modelId;
-                    if (!id) continue;
-                    // Only include models that support text output
-                    const outputModes = m.outputModalities || [];
-                    if (!outputModes.includes('TEXT')) continue;
-                    // Only include invoke-capable models
-                    const inferenceModes = m.inferenceTypesSupported || [];
-                    if (!inferenceModes.includes('ON_DEMAND') && !inferenceModes.includes('INFERENCE_PROFILE')) continue;
-
-                    let name = m.modelName || id;
-                    // Add provider prefix for clarity
-                    const provider = m.providerName || '';
-                    if (provider && !name.toLowerCase().startsWith(provider.toLowerCase())) {
-                        name = `${provider} ${name}`;
-                    }
-
-                    results.push({ uniqueId: `aws-${id}`, id: id, name: name });
-                }
-
-                // Also try cross-region inference profiles
-                try {
-                    const profileUrl = `https://bedrock.${region}.amazonaws.com/inference-profiles`;
-                    const profileSigner = new AwsV4Signer({
-                        method: 'GET',
-                        url: profileUrl,
-                        accessKeyId: key,
-                        secretAccessKey: secret,
-                        service: 'bedrock',
-                        region: region,
-                    });
-                    const profileSigned = await profileSigner.sign();
-                    const profileRes = await Risuai.nativeFetch(profileSigned.url.toString(), {
-                        method: profileSigned.method,
-                        headers: profileSigned.headers,
-                    });
-                    if (profileRes.ok) {
-                        const profileData = await profileRes.json();
-                        const profiles = profileData.inferenceProfileSummaries || [];
-                        for (const p of profiles) {
-                            const profileId = p.inferenceProfileId || p.inferenceProfileArn;
-                            if (!profileId) continue;
-                            // Skip if already have this model
-                            if (results.some(r => r.id === profileId)) continue;
-                            const name = p.inferenceProfileName || profileId;
-                            // Only include Anthropic cross-region profiles for now
-                            if (profileId.includes('anthropic') || profileId.includes('claude')) {
-                                results.push({ uniqueId: `aws-${profileId}`, id: profileId, name: `${name} (Cross-Region)` });
-                            }
-                        }
-                    }
-                } catch (pe) {
-                    console.warn('[CPM-AWS] Inference profiles listing not available:', pe.message);
-                }
-
-                return results.length > 0 ? results : null;
-            } catch (e) {
-                console.warn('[CPM-AWS] Dynamic model fetch error:', e);
-                return null;
-            }
-        },
         fetcher: async function (modelDef, messages, temp, maxTokens, args) {
             const config = {
                 key: await CPM.safeGetArg('cpm_aws_key'),
@@ -193,14 +103,13 @@
             id: 'tab-aws',
             icon: '🔶',
             label: 'AWS Bedrock',
-            exportKeys: ['cpm_aws_key', 'cpm_aws_secret', 'cpm_aws_region', 'cpm_aws_thinking_budget', 'cpm_aws_thinking_effort', 'cpm_dynamic_aws'],
+            exportKeys: ['cpm_aws_key', 'cpm_aws_secret', 'cpm_aws_region', 'cpm_aws_thinking_budget', 'cpm_aws_thinking_effort'],
             renderContent: async (renderInput, lists) => {
                 return `
                     <h3 class="text-3xl font-bold text-amber-400 mb-6 pb-3 border-b border-gray-700">AWS Bedrock Configuration (설정)</h3>
                     ${await renderInput('cpm_aws_key', 'Access Key ID (액세스 키)', 'password')}
                     ${await renderInput('cpm_aws_secret', 'Secret Access Key (시크릿 키)', 'password')}
                     ${await renderInput('cpm_aws_region', 'Region (리전 ex: us-east-1)')}
-                    ${await renderInput('cpm_dynamic_aws', '📡 서버에서 모델 목록 불러오기 (Fetch models from API)', 'checkbox')}
                     ${await renderInput('cpm_aws_thinking_budget', 'Thinking Budget Tokens (4.5 이하 모델용, 0은 끄기)', 'number')}
                     ${await renderInput('cpm_aws_thinking_effort', 'Adaptive Thinking Effort (4.6 모델용: low/medium/high/max)')}
                 `;

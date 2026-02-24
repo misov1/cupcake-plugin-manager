@@ -1,5 +1,5 @@
 // @name CPM Provider - Gemini Studio
-// @version 1.1.4
+// @version 1.0.2
 // @description Google Gemini Studio (API Key) provider for Cupcake PM
 // @icon 🔵
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-gemini.js
@@ -19,49 +19,6 @@
     CPM.registerProvider({
         name: 'GoogleAI',
         models: GEMINI_MODELS,
-        fetchDynamicModels: async () => {
-            try {
-                const key = await CPM.safeGetArg('cpm_gemini_key');
-                if (!key) return null;
-
-                let allModels = [];
-                let pageToken = null;
-
-                // Paginate through all available models
-                while (true) {
-                    let url = `https://generativelanguage.googleapis.com/v1beta/models?key=${key}&pageSize=100`;
-                    if (pageToken) url += `&pageToken=${encodeURIComponent(pageToken)}`;
-
-                    const res = await CPM.smartFetch(url, { method: 'GET' });
-                    if (!res.ok) return null;
-
-                    const data = await res.json();
-                    if (data.models) allModels = allModels.concat(data.models);
-                    if (!data.nextPageToken) break;
-                    pageToken = data.nextPageToken;
-                }
-
-                return allModels
-                    .filter(m => {
-                        // Only include models that support generateContent (chat/generation)
-                        if (!m.supportedGenerationMethods?.includes('generateContent')) return false;
-                        // Only include gemini models
-                        const id = (m.name || '').replace('models/', '');
-                        return id.startsWith('gemini-');
-                    })
-                    .map(m => {
-                        const id = m.name.replace('models/', '');
-                        return {
-                            uniqueId: `google-${id}`,
-                            id: id,
-                            name: m.displayName || id
-                        };
-                    });
-            } catch (e) {
-                console.warn('[CPM-Gemini] Dynamic model fetch error:', e);
-                return null;
-            }
-        },
         fetcher: async function (modelDef, messages, temp, maxTokens, args) {
             const config = {
                 key: await CPM.safeGetArg('cpm_gemini_key'),
@@ -110,12 +67,11 @@
             id: 'tab-gemini',
             icon: '🔵',
             label: 'Gemini Studio',
-            exportKeys: ['cpm_gemini_key', 'cpm_gemini_thinking_level', 'chat_gemini_preserveSystem', 'chat_gemini_showThoughtsToken', 'chat_gemini_useThoughtSignature', 'chat_gemini_usePlainFetch', 'cpm_dynamic_googleai'],
+            exportKeys: ['cpm_gemini_key', 'cpm_gemini_thinking_level', 'chat_gemini_preserveSystem', 'chat_gemini_showThoughtsToken', 'chat_gemini_useThoughtSignature', 'chat_gemini_usePlainFetch'],
             renderContent: async (renderInput, lists) => {
                 return `
                     <h3 class="text-3xl font-bold text-indigo-400 mb-6 pb-3 border-b border-gray-700">Gemini Studio Configuration (설정)</h3>
                     ${await renderInput('cpm_gemini_key', 'API Key (API 키)', 'password')}
-                    ${await renderInput('cpm_dynamic_googleai', '📡 서버에서 모델 목록 불러오기 (Fetch models from API)', 'checkbox')}
                     ${await renderInput('cpm_gemini_thinking_level', 'Thinking Level (생각 수준)', 'select', lists.thinkingList)}
                     ${await renderInput('chat_gemini_preserveSystem', 'Preserve System (시스템 프롬프트 보존)', 'checkbox')}
                     ${await renderInput('chat_gemini_showThoughtsToken', 'Show Thoughts Token Info (생각 토큰 알림 표시)', 'checkbox')}
