@@ -595,17 +595,19 @@ window.CupcakePM = {
 };
 console.log('[CupcakePM] API exposed on window.CupcakePM');
 
-// Map RisuAI's internal mode string to our exact LBI-style slots
-function mapModeToSlot(mode) {
-    const raw = (mode || 'chat').toLowerCase();
-    const map = {
-        'model': 'chat', 'chat': 'chat', 'submodel': 'chat', 'continue': 'chat', 'roleplay': 'chat',
-        'translate': 'translation', 'translation': 'translation',
-        'emotion': 'emotion', 'hypa': 'emotion',
-        'memory': 'memory', 'summarize': 'memory', 'summary': 'memory',
-        'other': 'other', 'lua': 'other', 'trigger': 'other', 'otherax': 'other'
-    };
-    return map[raw] || 'chat';
+// Infer request slot by checking if the invoked model matches a configured aux slot.
+// V3 overrides args.mode to 'v3', so we can't rely on mode for routing.
+// Instead, we reverse-lookup: if this model's uniqueId is assigned to an aux slot,
+// that's the slot we're serving.
+const AUX_SLOTS = ['translation', 'emotion', 'memory', 'other'];
+async function inferSlot(activeModelDef) {
+    for (const slot of AUX_SLOTS) {
+        const configuredId = await safeGetArg(`cpm_slot_${slot}`, '');
+        if (configuredId && configuredId === activeModelDef.uniqueId) {
+            return slot;
+        }
+    }
+    return 'chat';
 }
 
 function formatToOpenAI(messages, config = {}) {
@@ -811,7 +813,7 @@ function createAnthropicSSEStream(response, abortSignal) {
                                 if (currentEvent === 'content_block_delta' && obj.delta?.text) {
                                     controller.enqueue(obj.delta.text);
                                 }
-                            } catch {}
+                            } catch { }
                         }
                     }
                 }
@@ -892,7 +894,7 @@ async function checkStreamCapability() {
         const s1 = new ReadableStream({ start(c) { c.close(); } });
         const mc1 = new MessageChannel();
         const cloneable = await new Promise(resolve => {
-            const timer = setTimeout(() => { resolve(false); try { mc1.port1.close(); mc1.port2.close(); } catch {} }, 500);
+            const timer = setTimeout(() => { resolve(false); try { mc1.port1.close(); mc1.port2.close(); } catch { } }, 500);
             mc1.port2.onmessage = () => { clearTimeout(timer); resolve(true); mc1.port1.close(); mc1.port2.close(); };
             mc1.port2.onmessageerror = () => { clearTimeout(timer); resolve(false); mc1.port1.close(); mc1.port2.close(); };
             try { mc1.port1.postMessage({ s: s1 }); } // NO transfer list
@@ -915,7 +917,7 @@ async function checkStreamCapability() {
             const s2 = new ReadableStream({ start(c) { c.close(); } });
             const mc2 = new MessageChannel();
             const transferable = await new Promise(resolve => {
-                const timer = setTimeout(() => { resolve(false); try { mc2.port1.close(); mc2.port2.close(); } catch {} }, 500);
+                const timer = setTimeout(() => { resolve(false); try { mc2.port1.close(); mc2.port2.close(); } catch { } }, 500);
                 mc2.port2.onmessage = () => { clearTimeout(timer); resolve(true); mc2.port1.close(); mc2.port2.close(); };
                 try { mc2.port1.postMessage({ s: s2 }, [s2]); } // WITH transfer list
                 catch { clearTimeout(timer); resolve(false); }
@@ -1140,24 +1142,18 @@ async function fetchByProviderId(modelDef, args, abortSignal) {
 }
 
 async function handleRequest(args, activeModelDef, abortSignal) {
-    const slot = mapModeToSlot(args.mode);
+    // V3 forces args.mode='v3', so we infer the slot by checking if the
+    // invoked model matches a user-configured aux slot.
+    const slot = await inferSlot(activeModelDef);
 
-    // If it's the main chat slot, route to the provider that the UI initiated this call for
+    // Route to the provider that the UI / RisuAI selected
     let targetDef = activeModelDef;
 
-    // If it's an auxiliary slot (not chat), lookup the Cupcake Config mapped model
+    // If this model is assigned to an aux slot, apply generation param overrides
     if (slot !== 'chat') {
-        const configuredAuxUniqueId = await safeGetArg(`cpm_slot_${slot}`, '');
-        if (configuredAuxUniqueId && configuredAuxUniqueId !== '') {
-            const foundOption = ALL_DEFINED_MODELS.find(m => m.uniqueId === configuredAuxUniqueId);
-            if (foundOption) {
-                targetDef = foundOption;
-            } else {
-                console.warn(`[Cupcake PM] Overridden slot '${slot}' configured model '${configuredAuxUniqueId}' not found. Falling back to active UI model.`);
-            }
-        }
+        console.log(`[Cupcake PM] Aux slot detected: '${slot}' for model '${activeModelDef.name}'`);
 
-        // Override generation params if provided
+        // Override generation params if provided for this slot
         const maxOut = await safeGetArg(`cpm_slot_${slot}_max_out`);
         const maxCtx = await safeGetArg(`cpm_slot_${slot}_max_context`);
         const temp = await safeGetArg(`cpm_slot_${slot}_temp`);
@@ -1168,7 +1164,7 @@ async function handleRequest(args, activeModelDef, abortSignal) {
         const presPen = await safeGetArg(`cpm_slot_${slot}_pres_pen`);
 
         if (maxOut) args.max_tokens = parseInt(maxOut);
-        if (maxCtx) args.max_context_tokens = parseInt(maxCtx); // RisuAI uses this to build prompt, but usually done before here. Kept for passing down.
+        if (maxCtx) args.max_context_tokens = parseInt(maxCtx);
         if (temp) args.temperature = parseFloat(temp);
         if (topP) args.top_p = parseFloat(topP);
         if (topK) args.top_k = parseInt(topK);
