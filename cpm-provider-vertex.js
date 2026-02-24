@@ -1,5 +1,5 @@
 // @name CPM Provider - Vertex AI
-// @version 1.1.0
+// @version 1.1.1
 // @description Google Vertex AI (Service Account) provider for Cupcake PM
 // @icon 🔷
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-vertex.js
@@ -213,12 +213,13 @@
             id: 'tab-vertex',
             icon: '🔷',
             label: 'Vertex AI',
-            exportKeys: ['cpm_vertex_key_json', 'cpm_vertex_location', 'cpm_vertex_thinking_level', 'chat_vertex_preserveSystem', 'chat_vertex_showThoughtsToken', 'chat_vertex_useThoughtSignature'],
+            exportKeys: ['cpm_vertex_key_json', 'cpm_vertex_location', 'cpm_vertex_thinking_level', 'chat_vertex_preserveSystem', 'chat_vertex_showThoughtsToken', 'chat_vertex_useThoughtSignature', 'cpm_dynamic_vertexai'],
             renderContent: async (renderInput, lists) => {
                 return `
                     <h3 class="text-3xl font-bold text-blue-400 mb-6 pb-3 border-b border-gray-700">Vertex AI Configuration (설정)</h3>
                     ${await renderInput('cpm_vertex_key_json', 'Service Account JSON Key Code (서비스 계정 JSON 키)', 'textarea')}
                     ${await renderInput('cpm_vertex_location', 'Location Endpoint (리전 엔드포인트 ex: global, us-central1)')}
+                    ${await renderInput('cpm_dynamic_vertexai', '📡 서버에서 모델 목록 불러오기 (Fetch models from API)', 'checkbox')}
                     ${await renderInput('cpm_vertex_thinking_level', 'Thinking Level (생각 수준)', 'select', lists.thinkingList)}
                     ${await renderInput('chat_vertex_preserveSystem', 'Preserve System (시스템 프롬프트 보존)', 'checkbox')}
                     ${await renderInput('chat_vertex_showThoughtsToken', 'Show Thoughts Token Info (생각 토큰 알림 표시)', 'checkbox')}

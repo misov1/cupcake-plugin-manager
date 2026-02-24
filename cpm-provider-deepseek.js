@@ -1,5 +1,5 @@
 // @name CPM Provider - DeepSeek
-// @version 1.1.1
+// @version 1.1.2
 // @description DeepSeek provider for Cupcake PM
 // @icon 🟣
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-deepseek.js
@@ -65,11 +65,12 @@
             id: 'tab-deepseek',
             icon: '🟣',
             label: 'DeepSeek',
-            exportKeys: ['cpm_deepseek_key', 'cpm_deepseek_url'],
+            exportKeys: ['cpm_deepseek_key', 'cpm_deepseek_url', 'cpm_dynamic_deepseek'],
             renderContent: async (renderInput, lists) => {
                 return `
                     <h3 class="text-3xl font-bold text-purple-400 mb-6 pb-3 border-b border-gray-700">DeepSeek Configuration (설정)</h3>
                     ${await renderInput('cpm_deepseek_key', 'API Key (API 키)', 'password')}
+                    ${await renderInput('cpm_dynamic_deepseek', '📡 서버에서 모델 목록 불러오기 (Fetch models from API)', 'checkbox')}
                     ${await renderInput('cpm_deepseek_url', 'Custom Base URL (커스텀 API 주소 - 선택사항)')}
                 `;
             }

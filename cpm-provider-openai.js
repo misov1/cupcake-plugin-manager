@@ -1,5 +1,5 @@
 // @name CPM Provider - OpenAI
-// @version 1.1.1
+// @version 1.1.2
 // @description OpenAI provider for Cupcake PM
 // @icon 🟢
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-openai.js
@@ -107,11 +107,12 @@
             id: 'tab-openai',
             icon: '🟢',
             label: 'OpenAI',
-            exportKeys: ['cpm_openai_key', 'cpm_openai_reasoning', 'cpm_openai_verbosity', 'common_openai_servicetier', 'cpm_openai_url'],
+            exportKeys: ['cpm_openai_key', 'cpm_openai_reasoning', 'cpm_openai_verbosity', 'common_openai_servicetier', 'cpm_openai_url', 'cpm_dynamic_openai'],
             renderContent: async (renderInput, lists) => {
                 return `
                     <h3 class="text-3xl font-bold text-green-400 mb-6 pb-3 border-b border-gray-700">OpenAI Configuration (설정)</h3>
                     ${await renderInput('cpm_openai_key', 'API Key (sk-...)', 'password')}
+                    ${await renderInput('cpm_dynamic_openai', '📡 서버에서 모델 목록 불러오기 (Fetch models from API)', 'checkbox')}
                     ${await renderInput('cpm_openai_reasoning', 'Reasoning Effort (추론 수준 - o3, o1 series)', 'select', lists.reasoningList)}
                     ${await renderInput('cpm_openai_verbosity', 'Response Verbosity (응답 상세)', 'select', lists.verbosityList)}
                     ${await renderInput('common_openai_servicetier', 'Service Tier (응답 속도)', 'select', [{ value: '', text: 'Auto (자동)' }, { value: 'flex', text: 'Flex' }, { value: 'default', text: 'Default' }])}

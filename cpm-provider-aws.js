@@ -1,5 +1,5 @@
 // @name CPM Provider - AWS Bedrock
-// @version 1.2.0
+// @version 1.2.1
 // @description AWS Bedrock (Claude) provider for Cupcake PM
 // @icon 🔶
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-aws.js
@@ -193,13 +193,14 @@
             id: 'tab-aws',
             icon: '🔶',
             label: 'AWS Bedrock',
-            exportKeys: ['cpm_aws_key', 'cpm_aws_secret', 'cpm_aws_region', 'cpm_aws_thinking_budget', 'cpm_aws_thinking_effort'],
+            exportKeys: ['cpm_aws_key', 'cpm_aws_secret', 'cpm_aws_region', 'cpm_aws_thinking_budget', 'cpm_aws_thinking_effort', 'cpm_dynamic_aws'],
             renderContent: async (renderInput, lists) => {
                 return `
                     <h3 class="text-3xl font-bold text-amber-400 mb-6 pb-3 border-b border-gray-700">AWS Bedrock Configuration (설정)</h3>
                     ${await renderInput('cpm_aws_key', 'Access Key ID (액세스 키)', 'password')}
                     ${await renderInput('cpm_aws_secret', 'Secret Access Key (시크릿 키)', 'password')}
                     ${await renderInput('cpm_aws_region', 'Region (리전 ex: us-east-1)')}
+                    ${await renderInput('cpm_dynamic_aws', '📡 서버에서 모델 목록 불러오기 (Fetch models from API)', 'checkbox')}
                     ${await renderInput('cpm_aws_thinking_budget', 'Thinking Budget Tokens (4.5 이하 모델용, 0은 끄기)', 'number')}
                     ${await renderInput('cpm_aws_thinking_effort', 'Adaptive Thinking Effort (4.6 모델용: low/medium/high/max)')}
                 `;

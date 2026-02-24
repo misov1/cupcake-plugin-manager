@@ -1,5 +1,5 @@
 // @name CPM Provider - Gemini Studio
-// @version 1.1.1
+// @version 1.1.2
 // @description Google Gemini Studio (API Key) provider for Cupcake PM
 // @icon 🔵
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-gemini.js
@@ -110,11 +110,12 @@
             id: 'tab-gemini',
             icon: '🔵',
             label: 'Gemini Studio',
-            exportKeys: ['cpm_gemini_key', 'cpm_gemini_thinking_level', 'chat_gemini_preserveSystem', 'chat_gemini_showThoughtsToken', 'chat_gemini_useThoughtSignature', 'chat_gemini_usePlainFetch'],
+            exportKeys: ['cpm_gemini_key', 'cpm_gemini_thinking_level', 'chat_gemini_preserveSystem', 'chat_gemini_showThoughtsToken', 'chat_gemini_useThoughtSignature', 'chat_gemini_usePlainFetch', 'cpm_dynamic_googleai'],
             renderContent: async (renderInput, lists) => {
                 return `
                     <h3 class="text-3xl font-bold text-indigo-400 mb-6 pb-3 border-b border-gray-700">Gemini Studio Configuration (설정)</h3>
                     ${await renderInput('cpm_gemini_key', 'API Key (API 키)', 'password')}
+                    ${await renderInput('cpm_dynamic_googleai', '📡 서버에서 모델 목록 불러오기 (Fetch models from API)', 'checkbox')}
                     ${await renderInput('cpm_gemini_thinking_level', 'Thinking Level (생각 수준)', 'select', lists.thinkingList)}
                     ${await renderInput('chat_gemini_preserveSystem', 'Preserve System (시스템 프롬프트 보존)', 'checkbox')}
                     ${await renderInput('chat_gemini_showThoughtsToken', 'Show Thoughts Token Info (생각 토큰 알림 표시)', 'checkbox')}

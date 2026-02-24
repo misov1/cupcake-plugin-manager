@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.6.0
+//@version 1.6.1
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.6.0';
+const CPM_VERSION = '1.6.1';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -447,6 +447,11 @@ const SubPluginManager = {
             for (const { name, fetchDynamicModels } of [...pendingDynamicFetchers]) {
                 if (newProviderNames.includes(name)) {
                     try {
+                        const enabled = await isDynamicFetchEnabled(name);
+                        if (!enabled) {
+                            console.log(`[CupcakePM] Hot-reload: Dynamic fetch disabled for ${name}, using fallback.`);
+                            continue;
+                        }
                         console.log(`[CupcakePM] Hot-reload: Fetching dynamic models for ${name}...`);
                         const dynamicModels = await fetchDynamicModels();
                         if (dynamicModels && Array.isArray(dynamicModels) && dynamicModels.length > 0) {
@@ -470,6 +475,8 @@ const SubPluginManager = {
         await this.executeEnabled();
         for (const { name, fetchDynamicModels } of [...pendingDynamicFetchers]) {
             try {
+                const enabled = await isDynamicFetchEnabled(name);
+                if (!enabled) continue;
                 const dynamicModels = await fetchDynamicModels();
                 if (dynamicModels && Array.isArray(dynamicModels) && dynamicModels.length > 0) {
                     ALL_DEFINED_MODELS = ALL_DEFINED_MODELS.filter(m => m.provider !== name);
@@ -907,9 +914,23 @@ async function handleRequest(args, activeModelDef) {
             console.log(`[CPM] Auto-restored ${restoredCount} settings from persistent backup.`);
         }
 
+// Helper: Check if dynamic model fetching is enabled for a given provider
+// Setting key: cpm_dynamic_<providerName_lowercase> = 'true' means fetch from server
+// Default: true (fetch from server) for backward compatibility
+async function isDynamicFetchEnabled(providerName) {
+    const key = `cpm_dynamic_${providerName.toLowerCase()}`;
+    const val = await safeGetArg(key, 'true');
+    return val === 'true' || val === true;
+}
+
         // ===== Dynamic Model Fetching (공식 API에서 모델 목록 자동 갱신) =====
         for (const { name, fetchDynamicModels } of pendingDynamicFetchers) {
             try {
+                const enabled = await isDynamicFetchEnabled(name);
+                if (!enabled) {
+                    console.log(`[CupcakePM] Dynamic fetch disabled for ${name}, using fallback.`);
+                    continue;
+                }
                 console.log(`[CupcakePM] Fetching dynamic models for ${name}...`);
                 const dynamicModels = await fetchDynamicModels();
                 if (dynamicModels && Array.isArray(dynamicModels) && dynamicModels.length > 0) {
