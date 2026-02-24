@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.5.7
+//@version 1.6.0
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.5.7';
+const CPM_VERSION = '1.6.0';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -111,6 +111,8 @@ const customFetchers = {};
 const registeredProviderTabs = [];
 let vertexTokenCache = { token: null, expiry: 0 };
 const pendingDynamicFetchers = [];
+let _currentExecutingPluginId = null;
+const _pluginRegistrations = {}; // pluginId -> { providerNames: [], tabObjects: [], fetcherEntries: [] }
 
 // ==========================================
 // 3.1 PERSISTENT SETTINGS BACKUP (survives plugin deletion)
@@ -294,11 +296,15 @@ const SubPluginManager = {
         for (const p of this.plugins) {
             if (p.enabled) {
                 try {
+                    _currentExecutingPluginId = p.id;
+                    if (!_pluginRegistrations[p.id]) _pluginRegistrations[p.id] = { providerNames: [], tabObjects: [], fetcherEntries: [] };
                     const execWrapper = `(async () => {\ntry {\n${p.code}\n} catch(err) {\nconsole.error('[CPM Loader] Error executing plugin ${p.name}:', err);\n}\n})();`;
-                    eval(execWrapper);
+                    await eval(execWrapper);
                     console.log(`[CPM Loader] Loaded Sub-Plugin: ${p.name}`);
                 } catch (e) {
                     console.error(`[CPM Loader] Failed to load ${p.name}`, e);
+                } finally {
+                    _currentExecutingPluginId = null;
                 }
             }
         }
@@ -384,6 +390,96 @@ const SubPluginManager = {
         p.updateUrl = meta.updateUrl || p.updateUrl;
         await this.saveRegistry();
         return true;
+    },
+
+    // ── Hot-Reload Infrastructure ──
+
+    // Unload all providers/tabs/fetchers registered by a specific sub-plugin
+    unloadPlugin(pluginId) {
+        const reg = _pluginRegistrations[pluginId];
+        if (!reg) return;
+        for (const name of reg.providerNames) {
+            delete customFetchers[name];
+            ALL_DEFINED_MODELS = ALL_DEFINED_MODELS.filter(m => m.provider !== name);
+        }
+        for (const tab of reg.tabObjects) {
+            const idx = registeredProviderTabs.indexOf(tab);
+            if (idx !== -1) registeredProviderTabs.splice(idx, 1);
+        }
+        for (const entry of reg.fetcherEntries) {
+            const idx = pendingDynamicFetchers.findIndex(f => f.name === entry.name);
+            if (idx !== -1) pendingDynamicFetchers.splice(idx, 1);
+        }
+        _pluginRegistrations[pluginId] = { providerNames: [], tabObjects: [], fetcherEntries: [] };
+        console.log(`[CPM Loader] Unloaded registrations for plugin ${pluginId}`);
+    },
+
+    // Execute a single plugin (sets tracking context)
+    async executeOne(plugin) {
+        if (!plugin || !plugin.enabled) return;
+        try {
+            _currentExecutingPluginId = plugin.id;
+            if (!_pluginRegistrations[plugin.id]) _pluginRegistrations[plugin.id] = { providerNames: [], tabObjects: [], fetcherEntries: [] };
+            const execWrapper = `(async () => {\ntry {\n${plugin.code}\n} catch(err) {\nconsole.error('[CPM Loader] Error executing plugin ${plugin.name}:', err);\n}\n})();`;
+            await eval(execWrapper);
+            console.log(`[CPM Loader] Hot-loaded Sub-Plugin: ${plugin.name}`);
+        } catch (e) {
+            console.error(`[CPM Loader] Failed to hot-load ${plugin.name}`, e);
+        } finally {
+            _currentExecutingPluginId = null;
+        }
+    },
+
+    // Hot-reload a single sub-plugin: unload old registrations, re-execute, re-fetch dynamic models
+    async hotReload(pluginId) {
+        const plugin = this.plugins.find(p => p.id === pluginId);
+        if (!plugin) return false;
+
+        // 1. Unload old registrations
+        this.unloadPlugin(pluginId);
+
+        // 2. Re-execute if enabled
+        if (plugin.enabled) {
+            await this.executeOne(plugin);
+
+            // 3. Run dynamic model fetching for newly registered providers
+            const newProviderNames = (_pluginRegistrations[pluginId] || {}).providerNames || [];
+            for (const { name, fetchDynamicModels } of [...pendingDynamicFetchers]) {
+                if (newProviderNames.includes(name)) {
+                    try {
+                        console.log(`[CupcakePM] Hot-reload: Fetching dynamic models for ${name}...`);
+                        const dynamicModels = await fetchDynamicModels();
+                        if (dynamicModels && Array.isArray(dynamicModels) && dynamicModels.length > 0) {
+                            ALL_DEFINED_MODELS = ALL_DEFINED_MODELS.filter(m => m.provider !== name);
+                            for (const m of dynamicModels) ALL_DEFINED_MODELS.push({ ...m, provider: name });
+                            console.log(`[CupcakePM] ✓ Hot-reload dynamic models for ${name}: ${dynamicModels.length} models`);
+                        }
+                    } catch (e) {
+                        console.warn(`[CupcakePM] Hot-reload dynamic fetch failed for ${name}:`, e.message || e);
+                    }
+                }
+            }
+        }
+        console.log(`[CPM Loader] Hot-reload complete for: ${plugin.name}`);
+        return true;
+    },
+
+    // Hot-reload all enabled sub-plugins
+    async hotReloadAll() {
+        for (const p of this.plugins) this.unloadPlugin(p.id);
+        await this.executeEnabled();
+        for (const { name, fetchDynamicModels } of [...pendingDynamicFetchers]) {
+            try {
+                const dynamicModels = await fetchDynamicModels();
+                if (dynamicModels && Array.isArray(dynamicModels) && dynamicModels.length > 0) {
+                    ALL_DEFINED_MODELS = ALL_DEFINED_MODELS.filter(m => m.provider !== name);
+                    for (const m of dynamicModels) ALL_DEFINED_MODELS.push({ ...m, provider: name });
+                }
+            } catch (e) {
+                console.warn(`[CupcakePM] Hot-reload dynamic fetch failed for ${name}:`, e.message || e);
+            }
+        }
+        console.log('[CPM Loader] Hot-reload all complete.');
     }
 };
 
@@ -394,6 +490,16 @@ window.CupcakePM = {
     customFetchers,
     registeredProviderTabs,
     registerProvider({ name, models, fetcher, settingsTab, fetchDynamicModels }) {
+        // Track which sub-plugin registered this provider (for hot-reload cleanup)
+        if (_currentExecutingPluginId) {
+            if (!_pluginRegistrations[_currentExecutingPluginId]) {
+                _pluginRegistrations[_currentExecutingPluginId] = { providerNames: [], tabObjects: [], fetcherEntries: [] };
+            }
+            const reg = _pluginRegistrations[_currentExecutingPluginId];
+            if (!reg.providerNames.includes(name)) reg.providerNames.push(name);
+            if (settingsTab) reg.tabObjects.push(settingsTab);
+            if (typeof fetchDynamicModels === 'function') reg.fetcherEntries.push({ name, fetchDynamicModels });
+        }
         if (fetcher) customFetchers[name] = fetcher;
         if (models && Array.isArray(models)) {
             for (const m of models) ALL_DEFINED_MODELS.push({ ...m, provider: name });
@@ -413,6 +519,22 @@ window.CupcakePM = {
     get vertexTokenCache() { return vertexTokenCache; },
     set vertexTokenCache(v) { vertexTokenCache = v; },
     AwsV4Signer,
+    hotReload: (pluginId) => SubPluginManager.hotReload(pluginId),
+    hotReloadAll: () => SubPluginManager.hotReloadAll(),
+    /**
+     * smartFetch: Try direct browser fetch first (avoids proxy issues),
+     * fall back to Risuai.nativeFetch if CORS or network error occurs.
+     */
+    smartFetch: async (url, options = {}) => {
+        try {
+            const res = await fetch(url, options);
+            return res;
+        } catch (e) {
+            // Direct fetch failed (likely CORS), fall back to nativeFetch
+            console.log(`[CupcakePM] Direct fetch failed for ${url.substring(0, 60)}..., falling back to nativeFetch`);
+            return await Risuai.nativeFetch(url, options);
+        }
+    },
 };
 console.log('[CupcakePM] API exposed on window.CupcakePM');
 
@@ -1215,7 +1337,10 @@ async function handleRequest(args, activeModelDef) {
                         reader.onload = async (ev) => {
                             const code = ev.target.result;
                             const name = await SubPluginManager.install(code);
-                            alert(`서브 플러그인 '${name}' 설치 완료! 적용을 위해 화면을 새로고침(F5) 해주세요.`);
+                            // Hot-reload: 즉시 적용 (새로고침 불필요)
+                            const installed = SubPluginManager.plugins.find(p => p.name === name);
+                            if (installed) await SubPluginManager.hotReload(installed.id);
+                            alert(`서브 플러그인 '${name}' 설치 완료! 즉시 적용되었습니다.`);
                             renderPluginsTab();
                         };
                         reader.readAsText(file);
@@ -1227,13 +1352,16 @@ async function handleRequest(args, activeModelDef) {
                     t.addEventListener('change', async (e) => {
                         const id = e.target.getAttribute('data-id');
                         await SubPluginManager.toggle(id, e.target.checked);
-                        alert('설정이 저장되었습니다. 적용하려면 새로고침(F5) 하세요.');
+                        // Hot-reload: 즉시 적용
+                        await SubPluginManager.hotReload(id);
+                        alert('설정이 저장 및 즉시 적용되었습니다!');
                     });
                 });
                 listContainer.querySelectorAll('.cpm-plugin-delete').forEach(btn => {
                     btn.addEventListener('click', async (e) => {
                         const id = e.target.getAttribute('data-id');
                         if (confirm('정말로 이 플러그인을 삭제하시겠습니까?')) {
+                            SubPluginManager.unloadPlugin(id);
                             await SubPluginManager.remove(id);
                             renderPluginsTab();
                         }
@@ -1278,10 +1406,12 @@ async function handleRequest(args, activeModelDef) {
                                         e.target.textContent = '⏳ 적용 중...';
                                         const ok = await SubPluginManager.applyUpdate(id, updateData.code);
                                         if (ok) {
+                                            // Hot-reload: 즉시 적용 (새로고침 불필요)
+                                            await SubPluginManager.hotReload(id);
                                             e.target.textContent = '✅ 완료';
                                             e.target.classList.replace('bg-green-600', 'bg-gray-600');
                                             pendingUpdates.delete(id);
-                                            alert('업데이트 완료! 적용을 위해 새로고침(F5) 해주세요.');
+                                            alert('업데이트 완료! 즉시 적용되었습니다.');
                                         } else {
                                             e.target.textContent = '❌ 실패';
                                         }

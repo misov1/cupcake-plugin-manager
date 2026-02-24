@@ -1,5 +1,5 @@
 // @name CPM Provider - OpenAI
-// @version 1.1.0
+// @version 1.1.1
 // @description OpenAI provider for Cupcake PM
 // @icon 🟢
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-openai.js
@@ -27,7 +27,7 @@
                 const key = await CPM.safeGetArg('cpm_openai_key');
                 if (!key) return null;
 
-                const res = await Risuai.nativeFetch('https://api.openai.com/v1/models', {
+                const res = await CPM.smartFetch('https://api.openai.com/v1/models', {
                     method: 'GET',
                     headers: { 'Authorization': `Bearer ${key}` }
                 });

@@ -1,5 +1,5 @@
 // @name CPM Provider - Anthropic
-// @version 1.3.0
+// @version 1.3.1
 // @description Anthropic Claude provider for Cupcake PM
 // @icon 🟠
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-anthropic.js
@@ -51,7 +51,7 @@
                     let url = 'https://api.anthropic.com/v1/models?limit=100';
                     if (afterId) url += `&after_id=${encodeURIComponent(afterId)}`;
 
-                    const res = await Risuai.nativeFetch(url, {
+                    const res = await CPM.smartFetch(url, {
                         method: 'GET',
                         headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' }
                     });

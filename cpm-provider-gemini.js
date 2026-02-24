@@ -1,5 +1,5 @@
 // @name CPM Provider - Gemini Studio
-// @version 1.1.0
+// @version 1.1.1
 // @description Google Gemini Studio (API Key) provider for Cupcake PM
 // @icon 🔵
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-gemini.js
@@ -32,7 +32,7 @@
                     let url = `https://generativelanguage.googleapis.com/v1beta/models?key=${key}&pageSize=100`;
                     if (pageToken) url += `&pageToken=${encodeURIComponent(pageToken)}`;
 
-                    const res = await Risuai.nativeFetch(url, { method: 'GET' });
+                    const res = await CPM.smartFetch(url, { method: 'GET' });
                     if (!res.ok) return null;
 
                     const data = await res.json();
