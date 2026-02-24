@@ -1,7 +1,7 @@
 //@name CPM Component - Copilot Token Manager
 //@display-name Cupcake Copilot Manager
 //@api 3.0
-//@version 1.2.0
+//@version 1.2.1
 //@author Cupcake
 //@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-copilot-manager.js
 
@@ -70,23 +70,67 @@
     }
 
     // ==========================================
-    // SMART FETCH: direct fetch first, nativeFetch fallback
-    // GitHub OAuth endpoints (github.com/login/*) don't support CORS,
-    // but api.github.com and api.githubcopilot.com do.
+    // SMART FETCH: Multi-strategy approach
+    //
+    // Problem: Plugin runs in iframe (Origin: null) → direct fetch() CORS-blocked.
+    //          Risuai.nativeFetch on web → sv.risuai.xyz/proxy2 → 401 (proxy auth).
+    //          Risuai.nativeFetch on Tauri desktop → works natively (Rust HTTP).
+    //
+    // Solution:
+    //   1. nativeFetch (works on Tauri; on web, proxy may 401)
+    //   2. risuFetch + plainFetchForce (bypasses proxy, direct fetch from parent
+    //      frame with real origin → GitHub API CORS works)
+    //   3. Error with guidance
     // ==========================================
+    function wrapGlobalFetchResult(result) {
+        const bodyStr = typeof result.data === 'string' ? result.data : JSON.stringify(result.data);
+        return new Response(bodyStr, {
+            status: result.status || (result.ok ? 200 : 400),
+            headers: new Headers(result.headers || {}),
+        });
+    }
+
     async function copilotFetch(url, options = {}) {
-        // For OAuth endpoints that don't support CORS, go nativeFetch directly
+        const Risu = window.Risuai || window.risuai;
+
+        // OAuth endpoints: must use nativeFetch (github.com/login/* has no CORS)
         if (url.includes('github.com/login/')) {
             return await Risuai.nativeFetch(url, options);
         }
-        // For API endpoints, try direct fetch first (avoids broken proxy)
+
+        // --- Strategy 1: nativeFetch (works immediately on Tauri desktop) ---
+        let proxyFailed = false;
         try {
-            const res = await fetch(url, options);
-            return res;
+            const res = await Risuai.nativeFetch(url, options);
+            // If not a proxy 401, return as-is (success or real API error)
+            if (res.status !== 401) return res;
+            // Got 401 — could be proxy rejection on web. Try alternatives.
+            proxyFailed = true;
         } catch (e) {
-            console.log(LOG_TAG, `Direct fetch failed for ${url.substring(0, 60)}..., trying nativeFetch`);
-            return await Risuai.nativeFetch(url, options);
+            console.log(LOG_TAG, 'nativeFetch exception:', e.message);
+            proxyFailed = true;
         }
+
+        // --- Strategy 2: risuFetch + plainFetchForce ---
+        // Calls globalFetch → fetchWithPlainFetch → direct fetch() from parent
+        // frame (risuai.xyz origin). GitHub API supports CORS from real origins.
+        if (proxyFailed && typeof Risu.risuFetch === 'function') {
+            try {
+                console.log(LOG_TAG, `Trying risuFetch+plainFetchForce for ${url.substring(0, 60)}...`);
+                const result = await Risu.risuFetch(url, {
+                    method: options.method || 'GET',
+                    headers: options.headers || {},
+                    body: options.body ? JSON.parse(options.body) : undefined,
+                    plainFetchForce: true,
+                });
+                return wrapGlobalFetchResult(result);
+            } catch (e) {
+                console.log(LOG_TAG, 'risuFetch+plainFetch failed:', e.message);
+            }
+        }
+
+        // --- All strategies exhausted ---
+        throw new Error('네트워크 요청 실패: 프록시 인증 오류. RisuAI 데스크탑 앱을 사용하거나, RisuAI 설정 → 기타 봇 설정 → "Use plain fetch instead of server" 를 활성화해 보세요.');
     }
 
     // ==========================================
