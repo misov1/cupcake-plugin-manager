@@ -1,8 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.3.1
+//@version 1.4.0
 //@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/provider-manager.js
+
+const CPM_VERSION = '1.4.0';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -889,7 +891,7 @@ async function handleRequest(args, activeModelDef) {
             sidebar.className = 'w-full md:w-64 bg-gray-900 border-b md:border-b-0 md:border-r border-gray-700 flex flex-col pt-2 shrink-0 z-50 relative';
             sidebar.innerHTML = `
                     <div class="h-14 flex items-center justify-between px-6 border-b border-gray-700 md:border-none cursor-pointer md:cursor-default" id="cpm-mobile-menu-btn">
-                        <h2 class="text-lg font-extrabold bg-gradient-to-r from-blue-400 to-purple-500 text-transparent bg-clip-text">Cupcake PM v0.1</h2>
+                        <h2 class="text-lg font-extrabold bg-gradient-to-r from-blue-400 to-purple-500 text-transparent bg-clip-text">Cupcake PM v${CPM_VERSION}</h2>
                         <span class="md:hidden text-gray-400 text-xl" id="cpm-mobile-icon">▼</span>
                     </div>
                     
@@ -1614,7 +1616,7 @@ async function handleRequest(args, activeModelDef) {
         };
 
         await risuai.registerSetting(
-            'Cupcake PM v0.1',
+            `Cupcake PM v${CPM_VERSION}`,
             openCpmSettings,
             '🧁',
             'html'
