@@ -1,5 +1,5 @@
 // @name CPM Provider - DeepSeek
-// @version 1.0.0
+// @version 1.0.1
 // @description DeepSeek provider for Cupcake PM
 // @icon 🟣
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-deepseek.js

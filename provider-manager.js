@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.5.0
+//@version 1.5.1
 //@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/provider-manager.js
 
-const CPM_VERSION = '1.5.0';
+const CPM_VERSION = '1.5.1';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
