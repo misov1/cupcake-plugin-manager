@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.8.0
+//@version 1.8.1
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.8.0';
+const CPM_VERSION = '1.8.1';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -595,58 +595,25 @@ window.CupcakePM = {
 };
 console.log('[CupcakePM] API exposed on window.CupcakePM');
 
-// Infer request slot by checking RisuAI's native aux model config and CPM slot config.
+// Infer request slot using CPM's own slot configuration.
 // V3 overrides args.mode to 'v3', so we can't rely on mode for routing.
 //
-// Strategy (two-layer detection):
-//   1) Read RisuAI's DB seperateModels — if the invoked provider's pluginmodel ID
-//      matches a configured aux mode (translate, emotion, memory, otherAx), that's our slot.
-//   2) Fall back to CPM's own slot config (cpm_slot_*) for param overrides.
+// How it works: user assigns a SPECIFIC model to each aux slot in CPM settings.
+// If the invoked model's uniqueId matches a slot config, apply that slot's params.
+// Otherwise it's treated as main chat.
 //
-// RisuAI aux modes → CPM slot mapping:
-//   'translate'  → 'translation'
-//   'emotion'    → 'emotion'
-//   'memory'     → 'memory'
-//   'otherAx'    → 'other'
-const RISU_MODE_TO_CPM_SLOT = {
-    'translate': 'translation',
-    'emotion': 'emotion',
-    'memory': 'memory',
-    'otherAx': 'other'
-};
+// NOTE: DB-based detection (reading seperateModels) was intentionally removed.
+// It causes false positives when the same model handles both main chat AND aux
+// tasks, since the plugin API can't read which model is the main chat model.
 const CPM_SLOT_LIST = ['translation', 'emotion', 'memory', 'other'];
 
-async function inferSlot(activeModelDef, providerDisplayName) {
-    // --- Layer 1: RisuAI native DB detection ---
-    // RisuAI stores selected models as e.g. "pluginmodel:::[Cupcake PM] [GoogleAI] Gemini 2.5 Flash"
-    const pluginModelId = `pluginmodel:::${providerDisplayName}`;
-    try {
-        const db = await risuai.getDatabase(['seperateModelsForAxModels', 'seperateModels']);
-        if (db && db.seperateModelsForAxModels && db.seperateModels) {
-            for (const [risuMode, cpmSlot] of Object.entries(RISU_MODE_TO_CPM_SLOT)) {
-                if (db.seperateModels[risuMode] === pluginModelId) {
-                    console.log(`[Cupcake PM] DB-detected slot: '${cpmSlot}' (RisuAI mode '${risuMode}' → ${pluginModelId})`);
-                    return cpmSlot;
-                }
-            }
-            // Also check subModel (default aux model when seperateModelsForAxModels is on but a specific mode isn't set)
-            if (db.seperateModels['submodel'] === pluginModelId) {
-                // submodel is the catch-all aux — we can't tell which specific slot, treat as 'chat'
-                // unless a CPM slot matches below
-            }
-        }
-    } catch (e) {
-        console.warn('[Cupcake PM] Failed to read DB for slot detection:', e.message || e);
-    }
-
-    // --- Layer 2: CPM's own slot config fallback ---
+async function inferSlot(activeModelDef) {
     for (const slot of CPM_SLOT_LIST) {
         const configuredId = await safeGetArg(`cpm_slot_${slot}`, '');
         if (configuredId && configuredId === activeModelDef.uniqueId) {
             return slot;
         }
     }
-
     return 'chat';
 }
 
@@ -1181,11 +1148,9 @@ async function fetchByProviderId(modelDef, args, abortSignal) {
     }
 }
 
-async function handleRequest(args, activeModelDef, abortSignal, providerDisplayName) {
-    // V3 forces args.mode='v3', so we infer the slot by checking:
-    //   1) RisuAI's native DB seperateModels config
-    //   2) CPM's own slot config (cpm_slot_*)
-    const slot = await inferSlot(activeModelDef, providerDisplayName);
+async function handleRequest(args, activeModelDef, abortSignal) {
+    // V3 forces args.mode='v3', so we infer the slot from CPM's own slot config.
+    const slot = await inferSlot(activeModelDef);
 
     // Route to the provider that the UI / RisuAI selected
     let targetDef = activeModelDef;
@@ -1373,10 +1338,9 @@ async function handleRequest(args, activeModelDef, abortSignal, providerDisplayN
         for (const modelDef of ALL_DEFINED_MODELS) {
             let pLabel = modelDef.provider;
             let mLabel = modelDef.name;
-            const providerName = `[Cupcake PM] [${pLabel}] ${mLabel}`;
-            await Risuai.addProvider(providerName, async (args, abortSignal) => {
+            await Risuai.addProvider(`[Cupcake PM] [${pLabel}] ${mLabel}`, async (args, abortSignal) => {
                 try {
-                    return await handleRequest(args, modelDef, abortSignal, providerName);
+                    return await handleRequest(args, modelDef, abortSignal);
                 } catch (err) {
                     return { success: false, content: `[Cupcake SDK Fallback Crash] ${err.message}` };
                 }
