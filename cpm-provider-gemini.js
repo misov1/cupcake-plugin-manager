@@ -1,0 +1,83 @@
+// @name CPM Provider - Gemini Studio
+// @version 1.0.0
+// @description Google Gemini Studio (API Key) provider for Cupcake PM
+// @icon 🔵
+
+(() => {
+    const CPM = window.CupcakePM;
+    if (!CPM) { console.error('[CPM-Gemini] CupcakePM API not found!'); return; }
+
+    const GEMINI_MODELS = [
+        { uniqueId: 'google-gemini-3-pro-preview', id: 'gemini-3-pro-preview', name: 'Gemini 3 Pro Preview' },
+        { uniqueId: 'google-gemini-3.1-pro-preview', id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro Preview' },
+        { uniqueId: 'google-gemini-3-flash-preview', id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash Preview' },
+        { uniqueId: 'google-gemini-2.5-pro', id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
+        { uniqueId: 'google-gemini-2.5-flash', id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
+    ];
+
+    CPM.registerProvider({
+        name: 'GoogleAI',
+        models: GEMINI_MODELS,
+        fetcher: async function (modelDef, messages, temp, maxTokens, args) {
+            const config = {
+                key: await CPM.safeGetArg('cpm_gemini_key'),
+                model: modelDef.id,
+                thinking: await CPM.safeGetArg('cpm_gemini_thinking_level'),
+                preserveSystem: await CPM.safeGetBoolArg('chat_gemini_preserveSystem'),
+                showThoughtsToken: await CPM.safeGetBoolArg('chat_gemini_showThoughtsToken'),
+                useThoughtSignature: await CPM.safeGetBoolArg('chat_gemini_useThoughtSignature'),
+            };
+
+            const model = config.model || 'gemini-2.5-flash';
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${config.key}`;
+            const { contents, systemInstruction } = CPM.formatToGemini(messages, config);
+
+            const body = { contents, generationConfig: { temperature: temp, maxOutputTokens: maxTokens } };
+            if (args.top_p !== undefined && args.top_p !== null) body.generationConfig.topP = args.top_p;
+            if (args.top_k !== undefined && args.top_k !== null) body.generationConfig.topK = args.top_k;
+            if (args.frequency_penalty !== undefined && args.frequency_penalty !== null) body.generationConfig.frequencyPenalty = args.frequency_penalty;
+            if (args.presence_penalty !== undefined && args.presence_penalty !== null) body.generationConfig.presencePenalty = args.presence_penalty;
+            if (systemInstruction.length > 0) body.systemInstruction = { parts: systemInstruction.map(text => ({ text })) };
+            if (config.thinking && config.thinking !== 'off') body.generationConfig.thinkingConfig = { thinkingBudget: 8192 };
+
+            const res = await Risuai.nativeFetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+            if (!res.ok) return { success: false, content: `[Gemini Error ${res.status}] ${await res.text()}` };
+            const data = await res.json();
+            let result = '';
+            if (data.candidates?.[0]?.content?.parts) {
+                for (const part of data.candidates[0].content.parts) {
+                    if (part.thought && config.showThoughtsToken) result += `\n> [Thought Process]\n> ${part.thought}\n\n`;
+                    if ((part.thoughtSignature || part.thought_signature) && config.useThoughtSignature) {
+                        result += `\n> [Signature: ${part.thoughtSignature || part.thought_signature}]\n\n`;
+                    }
+                    if (part.text !== undefined) result += part.text;
+                }
+            }
+            if (!result && data.candidates?.[0]?.finishReason) {
+                let errStr = `[Google Studio: Response had no text. Finish Reason: ${data.candidates[0].finishReason}]\n`;
+                errStr += `[Raw Data: ${JSON.stringify(data)}]\n`;
+                if (data.candidates[0].safetyRatings) errStr += `[Safety Ratings: ${JSON.stringify(data.candidates[0].safetyRatings)}]`;
+                return { success: false, content: errStr };
+            }
+            if (!result) return { success: false, content: `[Google Studio: Unknown empty response. Raw: ${JSON.stringify(data)}]` };
+            return { success: true, content: result };
+        },
+        settingsTab: {
+            id: 'tab-gemini',
+            icon: '🔵',
+            label: 'Gemini Studio',
+            exportKeys: ['cpm_gemini_key', 'cpm_gemini_thinking_level', 'chat_gemini_preserveSystem', 'chat_gemini_showThoughtsToken', 'chat_gemini_useThoughtSignature', 'chat_gemini_usePlainFetch'],
+            renderContent: async (renderInput, lists) => {
+                return `
+                    <h3 class="text-3xl font-bold text-indigo-400 mb-6 pb-3 border-b border-gray-700">Gemini Studio Configuration (설정)</h3>
+                    ${await renderInput('cpm_gemini_key', 'API Key (API 키)', 'password')}
+                    ${await renderInput('cpm_gemini_thinking_level', 'Thinking Level (생각 수준)', 'select', lists.thinkingList)}
+                    ${await renderInput('chat_gemini_preserveSystem', 'Preserve System (시스템 프롬프트 보존)', 'checkbox')}
+                    ${await renderInput('chat_gemini_showThoughtsToken', 'Show Thoughts Token Info (생각 토큰 알림 표시)', 'checkbox')}
+                    ${await renderInput('chat_gemini_useThoughtSignature', 'Use Thought Signature (생각 서명 추출 사용)', 'checkbox')}
+                    ${await renderInput('chat_gemini_usePlainFetch', 'Use Plain Fetch (직접 요청 쓰기 - 프록시/V3 캐싱 우회)', 'checkbox')}
+                `;
+            }
+        }
+    });
+})();

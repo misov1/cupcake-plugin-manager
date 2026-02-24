@@ -1,0 +1,9 @@
+*복사본*
+*.bak
+*.cjs
+diff.txt
+cupcake_pm_settings*.json
+index.js
+modify_*.js
+provider-manager_*.js
+style.css
