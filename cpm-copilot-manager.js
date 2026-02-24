@@ -848,5 +848,5 @@
         }
     });
 
-    console.log(`${LOG_TAG} Settings tab registered (v1.3.0) — sidebar: 🔑 Copilot`);
+    console.log(`${LOG_TAG} Settings tab registered (v1.4.0) — sidebar: 🔑 Copilot`);
 })();
