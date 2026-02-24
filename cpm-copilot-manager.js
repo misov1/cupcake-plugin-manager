@@ -1,7 +1,7 @@
 //@name CPM Component - Copilot Token Manager
 //@display-name Cupcake Copilot Manager
 //@api 3.0
-//@version 1.2.3
+//@version 1.2.4
 //@author Cupcake
 //@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-copilot-manager.js
 
@@ -70,16 +70,26 @@
     }
 
     // ==========================================
-    // SMART FETCH: Uses risuFetch with plainFetchDeforce
+    // SMART FETCH: Strategy per endpoint type
     //
-    // V3 plugins run in sandboxed iframe; all API calls go through RPC bridge.
+    // V3 plugins run in sandboxed iframe; all API calls go through RPC bridge
+    // to the host, which calls globalFetch.
     //
-    // - Risuai.risuFetch = globalFetch (supports plainFetchDeforce option)
+    // Problem: RisuAI cloud proxy (sv.risuai.xyz/proxy2) returns 401 for
+    // GET requests — the cloud proxy likely only supports POST /proxy2.
+    // fetchWithProxy uses arg.method directly, so GET requests hit the proxy
+    // as GET and get rejected.
     //
-    // LBI v2 approach (proven working):
-    //   risuFetch + plainFetchDeforce: true → forces proxy/Tauri route
-    //   This ensures proper risu-header/risu-url encoding for the proxy,
-    //   bypassing CORS issues and Header serialization problems in V3 iframe.
+    // Solution:
+    //   api.github.com / api.githubcopilot.com endpoints:
+    //     → plainFetchForce: true (direct browser fetch from host window)
+    //     → GitHub API supports CORS (Access-Control-Allow-Origin: *)
+    //     → Bypasses proxy entirely, works for both GET and POST
+    //
+    //   github.com/login/* OAuth endpoints:
+    //     → plainFetchDeforce: true (forces proxy route)
+    //     → github.com/login doesn't support CORS, must go through proxy
+    //     → OAuth calls use POST, which the proxy handles fine
     //
     // body is passed as a plain object (risuFetch handles JSON.stringify).
     // rawResponse: false → returns parsed JSON in result.data.
@@ -111,6 +121,18 @@
         };
     }
 
+    /**
+     * Check if a risuFetch result represents a real HTTP response
+     * (even error like 401/403) vs a network/CORS/fetch failure.
+     * Network failures get: { ok:false, data:"TypeError:...", headers:{}, status:400 }
+     */
+    function isRealHttpResponse(result) {
+        if (result.headers && Object.keys(result.headers).length > 0) return true;
+        if (result.status && result.status !== 400) return true;
+        if (result.data && typeof result.data === 'object') return true;
+        return false;
+    }
+
     async function copilotFetch(url, options = {}) {
         const Risu = window.Risuai || window.risuai;
         const method = options.method || (url.includes('github.com/login/') ? 'POST' : 'GET');
@@ -126,8 +148,52 @@
             }
         }
 
+        // --- OAuth endpoints (github.com/login/*) → must use proxy (no CORS) ---
+        if (url.includes('github.com/login/')) {
+            try {
+                console.log(LOG_TAG, `risuFetch [proxy/OAuth] for ${url.substring(0, 80)}...`);
+                const result = await Risu.risuFetch(url, {
+                    method,
+                    headers,
+                    body,
+                    rawResponse: false,
+                    plainFetchDeforce: true,
+                });
+                console.log(LOG_TAG, `risuFetch [proxy] ok=${result.ok}, status=${result.status}`);
+                return wrapRisuFetchResult(result);
+            } catch (e) {
+                console.error(LOG_TAG, 'risuFetch [proxy/OAuth] failed:', e.message);
+                throw new Error(`OAuth 요청 실패: ${e.message}`);
+            }
+        }
+
+        // --- API endpoints (api.github.com, api.githubcopilot.com) ---
+        // Strategy 1: Direct fetch via plainFetchForce (bypasses proxy, uses CORS)
         try {
-            console.log(LOG_TAG, `risuFetch (plainFetchDeforce) for ${url.substring(0, 80)}...`);
+            console.log(LOG_TAG, `risuFetch [direct] for ${url.substring(0, 80)}...`);
+            const result = await Risu.risuFetch(url, {
+                method,
+                headers,
+                body,
+                rawResponse: false,
+                plainFetchForce: true,
+            });
+            if (isRealHttpResponse(result)) {
+                console.log(LOG_TAG, `risuFetch [direct] ok=${result.ok}, status=${result.status}`);
+                if (!result.ok && result.status === 401) {
+                    const errDetail = typeof result.data === 'string' ? result.data.substring(0, 200) : JSON.stringify(result.data);
+                    console.warn(LOG_TAG, `401 응답 상세: ${errDetail}`);
+                }
+                return wrapRisuFetchResult(result);
+            }
+            console.log(LOG_TAG, `risuFetch [direct] not a real HTTP response:`, typeof result.data === 'string' ? result.data.substring(0, 150) : 'unknown');
+        } catch (e) {
+            console.log(LOG_TAG, 'risuFetch [direct] exception:', e.message);
+        }
+
+        // Strategy 2: Proxy via plainFetchDeforce (for Tauri/desktop or if CORS fails)
+        try {
+            console.log(LOG_TAG, `risuFetch [proxy] for ${url.substring(0, 80)}...`);
             const result = await Risu.risuFetch(url, {
                 method,
                 headers,
@@ -135,13 +201,33 @@
                 rawResponse: false,
                 plainFetchDeforce: true,
             });
-            console.log(LOG_TAG, `risuFetch returned ok=${result.ok}, status=${result.status}`);
-            return wrapRisuFetchResult(result);
+            if (isRealHttpResponse(result)) {
+                console.log(LOG_TAG, `risuFetch [proxy] ok=${result.ok}, status=${result.status}`);
+                if (!result.ok && result.status === 401) {
+                    const errDetail = typeof result.data === 'string' ? result.data.substring(0, 200) : JSON.stringify(result.data);
+                    console.warn(LOG_TAG, `401 [proxy] 응답 상세: ${errDetail}`);
+                }
+                return wrapRisuFetchResult(result);
+            }
+            console.log(LOG_TAG, `risuFetch [proxy] not a real HTTP response:`, typeof result.data === 'string' ? result.data.substring(0, 150) : 'unknown');
         } catch (e) {
-            console.error(LOG_TAG, 'risuFetch (plainFetchDeforce) failed:', e.message);
+            console.log(LOG_TAG, 'risuFetch [proxy] exception:', e.message);
         }
 
-        throw new Error('네트워크 요청 실패: risuFetch 요청이 실패했습니다. RisuAI 데스크탑 앱을 사용하거나, 네트워크 연결을 확인해 보세요.');
+        // Strategy 3: nativeFetch as last resort (uses proxy on web, native on Tauri)
+        try {
+            console.log(LOG_TAG, `nativeFetch for ${url.substring(0, 80)}...`);
+            const res = await Risu.nativeFetch(url, {
+                method,
+                headers,
+                body: body ? JSON.stringify(body) : undefined,
+            });
+            return res;
+        } catch (e) {
+            console.log(LOG_TAG, 'nativeFetch exception:', e.message);
+        }
+
+        throw new Error('네트워크 요청 실패: 모든 요청 방식이 실패했습니다. RisuAI 데스크탑 앱을 사용하거나, RisuAI 설정 → 기타 봇 설정 → "Use plain fetch instead of server"를 활성화하세요.');
     }
 
     // ==========================================
@@ -594,5 +680,5 @@
         }
     });
 
-    console.log(`${LOG_TAG} Settings tab registered (v1.2.3) — sidebar: 🔑 Copilot`);
+    console.log(`${LOG_TAG} Settings tab registered (v1.2.4) — sidebar: 🔑 Copilot`);
 })();
