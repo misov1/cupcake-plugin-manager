@@ -1,7 +1,7 @@
 //@name CPM Component - Copilot Token Manager
 //@display-name Cupcake Copilot Manager
 //@api 3.0
-//@version 1.1.4
+//@version 1.2.0
 //@author Cupcake
 //@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-copilot-manager.js
 
@@ -70,10 +70,30 @@
     }
 
     // ==========================================
+    // SMART FETCH: direct fetch first, nativeFetch fallback
+    // GitHub OAuth endpoints (github.com/login/*) don't support CORS,
+    // but api.github.com and api.githubcopilot.com do.
+    // ==========================================
+    async function copilotFetch(url, options = {}) {
+        // For OAuth endpoints that don't support CORS, go nativeFetch directly
+        if (url.includes('github.com/login/')) {
+            return await Risuai.nativeFetch(url, options);
+        }
+        // For API endpoints, try direct fetch first (avoids broken proxy)
+        try {
+            const res = await fetch(url, options);
+            return res;
+        } catch (e) {
+            console.log(LOG_TAG, `Direct fetch failed for ${url.substring(0, 60)}..., trying nativeFetch`);
+            return await Risuai.nativeFetch(url, options);
+        }
+    }
+
+    // ==========================================
     // COPILOT API FUNCTIONS
     // ==========================================
     async function requestDeviceCode() {
-        const res = await Risuai.nativeFetch('https://github.com/login/device/code', {
+        const res = await copilotFetch('https://github.com/login/device/code', {
             method: 'POST',
             headers: { 'Accept': 'application/json', 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
             body: JSON.stringify({ client_id: GITHUB_CLIENT_ID, scope: 'user:email' }),
@@ -83,7 +103,7 @@
     }
 
     async function exchangeAccessToken(deviceCode) {
-        const res = await Risuai.nativeFetch('https://github.com/login/oauth/access_token', {
+        const res = await copilotFetch('https://github.com/login/oauth/access_token', {
             method: 'POST',
             headers: { 'Accept': 'application/json', 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
             body: JSON.stringify({ client_id: GITHUB_CLIENT_ID, device_code: deviceCode, grant_type: 'urn:ietf:params:oauth:grant-type:device_code' }),
@@ -96,9 +116,9 @@
     }
 
     async function checkTokenStatus(token) {
-        const res = await Risuai.nativeFetch('https://api.github.com/copilot_internal/v2/token', {
+        const res = await copilotFetch('https://api.github.com/copilot_internal/v2/token', {
             method: 'GET',
-            headers: { 'Accept': 'application/json', 'Authorization': `Bearer ${token}`, 'Origin': 'vscode-file://vscode-app', 'User-Agent': USER_AGENT },
+            headers: { 'Accept': 'application/json', 'Authorization': `Bearer ${token}`, 'User-Agent': USER_AGENT },
         });
         if (!res.ok) throw new Error(`상태 확인 실패 (${res.status}): ${await res.text()}`);
         return await res.json();
@@ -112,7 +132,7 @@
 
     async function fetchModelList(token) {
         const tidData = await getTidToken(token);
-        const res = await Risuai.nativeFetch('https://api.githubcopilot.com/models', {
+        const res = await copilotFetch('https://api.githubcopilot.com/models', {
             method: 'GET',
             headers: {
                 'Accept': 'application/json', 'Authorization': `Bearer ${tidData.token}`,
@@ -152,14 +172,14 @@
         } catch (e) { console.warn(LOG_TAG, 'JWT decode partial failure:', e); }
         // GitHub rate limits
         try {
-            const rlRes = await Risuai.nativeFetch('https://api.github.com/rate_limit', {
+            const rlRes = await copilotFetch('https://api.github.com/rate_limit', {
                 method: 'GET', headers: { 'Accept': 'application/json', 'Authorization': `Bearer ${token}`, 'User-Agent': USER_AGENT },
             });
             if (rlRes.ok) quotaInfo.github_rate_limit = await rlRes.json();
         } catch (e) { console.warn(LOG_TAG, 'Rate limit check failed:', e); }
         // Copilot user info
         try {
-            const uRes = await Risuai.nativeFetch('https://api.github.com/user/copilot', {
+            const uRes = await copilotFetch('https://api.github.com/user/copilot', {
                 method: 'GET', headers: { 'Accept': 'application/json', 'Authorization': `Bearer ${token}`, 'User-Agent': USER_AGENT, 'X-GitHub-Api-Version': '2022-11-28' },
             });
             if (uRes.ok) quotaInfo.copilot_user = await uRes.json();
@@ -397,15 +417,49 @@
     actions.autoConfig = async () => {
         const token = await getToken();
         if (!token) { showError('저장된 토큰이 없습니다. 먼저 토큰을 생성하세요.'); return; }
-        if (!confirm(`GitHub Copilot 자동 설정을 진행하시겠습니까?\n\nCustom Model에 다음 설정이 추가됩니다:\n  URL: https://api.githubcopilot.com/chat/completions\n  모델: gpt-4.1\n  포맷: OpenAI`)) return;
-        toast('자동 설정 안내를 확인하세요.');
-        showSuccess(`<strong>⚙️ 자동 설정 안내</strong>
-            <p class="mt-2 text-sm">Copilot을 사용하려면 Provider Manager에서 Custom Model을 추가하세요:</p>
-            <div class="bg-gray-900 rounded p-3 mt-2 text-xs font-mono text-gray-300 space-y-1">
-                <div><strong>URL:</strong> https://api.githubcopilot.com/chat/completions</div>
-                <div><strong>모델:</strong> gpt-4.1</div>
-                <div><strong>Key:</strong> 토큰은 tools_githubCopilotToken 에 자동 저장됩니다.</div>
-            </div>`);
+        if (!confirm(`GitHub Copilot 자동 설정을 진행하시겠습니까?\n\nCustom Model에 다음 설정이 자동 추가됩니다:\n  URL: https://api.githubcopilot.com/chat/completions\n  모델: gpt-4.1\n  포맷: OpenAI\n\n기존 Copilot 커스텀 모델이 있으면 덮어씁니다.`)) return;
+        showLoading('자동 설정 적용 중...');
+        try {
+            // Check if addCustomModel API is available
+            if (typeof CPM.addCustomModel !== 'function') {
+                showError('CupcakePM 버전이 낮아 자동 설정을 지원하지 않습니다. Provider Manager를 업데이트해주세요.');
+                return;
+            }
+            const modelDef = {
+                name: '🤖 Copilot (GPT-4.1)',
+                model: 'gpt-4.1',
+                url: 'https://api.githubcopilot.com/chat/completions',
+                key: '',
+                format: 'openai',
+                sysfirst: false,
+                mergesys: false,
+                altrole: false,
+                mustuser: false,
+                maxout: false,
+                decoupled: false,
+                thought: false,
+                reasoning: 'none',
+                verbosity: 'none',
+                thinking: 'none',
+                tok: 'o200k_base',
+                customParams: '',
+            };
+            const result = CPM.addCustomModel(modelDef, 'copilot-auto');
+            if (result.success) {
+                toast('Copilot 커스텀 모델이 추가되었습니다!');
+                showSuccess(`<strong>✅ 자동 설정 완료!</strong>
+                    <p class="mt-2 text-sm">다음 Custom Model이 ${result.created ? '생성' : '업데이트'}되었습니다:</p>
+                    <div class="bg-gray-900 rounded p-3 mt-2 text-xs font-mono text-gray-300 space-y-1">
+                        <div><strong>이름:</strong> ${escapeHtml(modelDef.name)}</div>
+                        <div><strong>URL:</strong> ${escapeHtml(modelDef.url)}</div>
+                        <div><strong>모델:</strong> ${escapeHtml(modelDef.model)}</div>
+                        <div><strong>Key:</strong> Copilot 토큰 자동 사용 (githubcopilot.com URL 감지)</div>
+                    </div>
+                    <p class="mt-3 text-xs text-yellow-300">💡 RisuAI 메인 UI에서 [Cupcake PM] [Custom] 🤖 Copilot (GPT-4.1) 을 선택하면 사용할 수 있습니다.<br>변경사항을 적용하려면 설정을 닫고 플러그인을 다시 로드하세요.</p>`);
+            } else {
+                showError('커스텀 모델 추가에 실패했습니다: ' + (result.error || '알 수 없는 오류'));
+            }
+        } catch (e) { showError(e.message); }
     };
 
     // Expose on window for inline onclick (settings tab HTML uses these)

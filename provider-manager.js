@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.6.4
+//@version 1.6.5
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.6.4';
+const CPM_VERSION = '1.6.5';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -542,6 +542,36 @@ window.CupcakePM = {
     AwsV4Signer,
     hotReload: (pluginId) => SubPluginManager.hotReload(pluginId),
     hotReloadAll: () => SubPluginManager.hotReloadAll(),
+    /**
+     * addCustomModel: Programmatically add or update a Custom Model.
+     * @param {Object} modelDef - Model definition (name, model, url, key, format, etc.)
+     * @param {string} [tag] - Optional tag to identify models created by a specific source (for upsert).
+     * @returns {{ success: boolean, created: boolean, uniqueId: string, error?: string }}
+     */
+    addCustomModel(modelDef, tag = '') {
+        try {
+            let existingIdx = -1;
+            if (tag) {
+                existingIdx = CUSTOM_MODELS_CACHE.findIndex(m => m._tag === tag);
+            }
+            if (existingIdx !== -1) {
+                // Update existing
+                CUSTOM_MODELS_CACHE[existingIdx] = { ...CUSTOM_MODELS_CACHE[existingIdx], ...modelDef, _tag: tag };
+                risuai.setArgument('cpm_custom_models', JSON.stringify(CUSTOM_MODELS_CACHE));
+                return { success: true, created: false, uniqueId: CUSTOM_MODELS_CACHE[existingIdx].uniqueId };
+            } else {
+                // Create new
+                const uniqueId = 'custom_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+                const entry = { ...modelDef, uniqueId, _tag: tag || undefined };
+                CUSTOM_MODELS_CACHE.push(entry);
+                ALL_DEFINED_MODELS.push({ uniqueId, id: entry.model, name: entry.name || uniqueId, provider: 'Custom' });
+                risuai.setArgument('cpm_custom_models', JSON.stringify(CUSTOM_MODELS_CACHE));
+                return { success: true, created: true, uniqueId };
+            }
+        } catch (e) {
+            return { success: false, created: false, uniqueId: '', error: e.message };
+        }
+    },
     /**
      * smartFetch: Try direct browser fetch first (avoids proxy issues),
      * fall back to Risuai.nativeFetch if CORS or network error occurs.
