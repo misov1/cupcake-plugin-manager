@@ -919,8 +919,7 @@ async function handleRequest(args, activeModelDef) {
 // Default: true (fetch from server) for backward compatibility
 async function isDynamicFetchEnabled(providerName) {
     const key = `cpm_dynamic_${providerName.toLowerCase()}`;
-    const val = await safeGetArg(key, 'true');
-    return val === 'true' || val === true;
+    return await safeGetBoolArg(key, true);
 }
 
         // ===== Dynamic Model Fetching (공식 API에서 모델 목록 자동 갱신) =====
