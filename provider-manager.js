@@ -2,7 +2,7 @@
 //@display-name Cupcake Provider Manager
 //@api 3.0
 //@version 1.5.5
-//@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/provider-manager.js
+//@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
 const CPM_VERSION = '1.5.5';
 
