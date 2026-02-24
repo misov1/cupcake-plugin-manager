@@ -1,7 +1,7 @@
 //@name CPM Component - Copilot Token Manager
 //@display-name Cupcake Copilot Manager
 //@api 3.0
-//@version 1.4.0
+//@version 1.5.0
 //@author Cupcake
 //@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-copilot-manager.js
 
@@ -332,10 +332,9 @@
         const tidData = await getTidToken(token);
         const quotaInfo = { plan: tidData.sku || 'unknown' };
 
-        // 1. Extract all useful fields from token endpoint response
-        //    (sku, chat_enabled, expires_at, limited_user_quotas, etc.)
+        // 1. Extract useful fields from token endpoint response
         const tokenMeta = {};
-        const skipKeys = ['token', 'tracking_id']; // Don't expose sensitive data
+        const skipKeys = ['token', 'tracking_id'];
         for (const [k, v] of Object.entries(tidData)) {
             if (!skipKeys.includes(k) && k !== 'sku') {
                 tokenMeta[k] = v;
@@ -345,70 +344,31 @@
             quotaInfo.token_meta = tokenMeta;
         }
 
-        // 2. Decode JWT payload (may be encrypted for Pro+ plans)
+        // 2. Copilot usage / quota via copilot_internal/user
+        //    This is the correct endpoint for quota_snapshots (premium_interactions, chat, completions)
+        //    Reference: copilotstats.com uses this same endpoint
         try {
-            const parts = tidData.token.split('.');
-            if (parts.length >= 2) {
-                let b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
-                while (b64.length % 4 !== 0) b64 += '=';
-                const decoded = atob(b64);
-                if (decoded.charAt(0) === '{') {
-                    const payload = JSON.parse(decoded);
-                    quotaInfo.payload = payload;
-                    if (payload.chat) quotaInfo.chat = payload.chat;
-                    if (payload.rt) quotaInfo.rateLimit = payload.rt;
-                    if (payload.sku) quotaInfo.plan = payload.sku;
-                    for (const [k, v] of Object.entries(payload)) {
-                        if (k.includes('limit') || k.includes('quota') || k.includes('rate') || k.includes('usage') || k.includes('premium')) quotaInfo[k] = v;
-                    }
-                } else {
-                    console.log(LOG_TAG, 'JWT payload is encrypted, skipping decode.');
-                }
-            }
-        } catch (e) { console.warn(LOG_TAG, 'JWT decode partial failure:', e); }
-
-        // 3. Call Copilot API to capture rate limit headers (premium request quota)
-        try {
-            console.log(LOG_TAG, 'Fetching Copilot API rate limits via /models endpoint...');
-            const modelsRes = await copilotFetch('https://api.githubcopilot.com/models', {
+            console.log(LOG_TAG, 'Fetching Copilot quota via /copilot_internal/user...');
+            const userRes = await copilotFetch('https://api.github.com/copilot_internal/user', {
                 method: 'GET',
                 headers: {
                     'Accept': 'application/json',
-                    'Authorization': `Bearer ${tidData.token}`,
-                    'Editor-Version': `vscode/${CODE_VERSION}`,
-                    'Editor-Plugin-Version': `copilot-chat/${CHAT_VERSION}`,
-                    'Copilot-Integration-Id': 'vscode-chat',
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
                     'User-Agent': USER_AGENT,
                 },
             });
-            if (modelsRes.headers) {
-                const rlHeaders = {};
-                const h = modelsRes.headers;
-                for (const key of Object.keys(h)) {
-                    const lk = key.toLowerCase();
-                    if (lk.includes('ratelimit') || lk.includes('rate-limit') || lk.includes('x-ratelimit')) {
-                        rlHeaders[key] = h[key];
-                    }
+            if (userRes.ok) {
+                const userData = await userRes.json();
+                quotaInfo.copilot_user = userData;
+                if (userData.quota_snapshots) {
+                    quotaInfo.quota_snapshots = userData.quota_snapshots;
                 }
-                if (Object.keys(rlHeaders).length > 0) {
-                    quotaInfo.copilot_rate_headers = rlHeaders;
-                    console.log(LOG_TAG, 'Copilot rate limit headers:', rlHeaders);
-                } else {
-                    console.log(LOG_TAG, 'No rate limit headers found in Copilot API response (may be blocked by CORS).');
-                }
+                console.log(LOG_TAG, 'Copilot user data retrieved successfully.');
+            } else {
+                console.warn(LOG_TAG, `copilot_internal/user returned ${userRes.status}`);
             }
-        } catch (e) { console.warn(LOG_TAG, 'Copilot rate limit header check failed:', e); }
-
-        // 4. GitHub REST API rate limit (informational only, NOT Copilot quota)
-        try {
-            const rlRes = await copilotFetch('https://api.github.com/rate_limit', {
-                method: 'GET', headers: { 'Accept': 'application/json', 'Authorization': `Bearer ${token}`, 'User-Agent': USER_AGENT },
-            });
-            if (rlRes.ok) quotaInfo.github_rate_limit = await rlRes.json();
-        } catch (e) { console.warn(LOG_TAG, 'GitHub API rate limit check failed:', e); }
-
-        // NOTE: /user/copilot endpoint removed — returns 404 for individual subscribers
-        // (only works for organization-managed Copilot seats)
+        } catch (e) { console.warn(LOG_TAG, 'Copilot user quota check failed:', e); }
 
         return quotaInfo;
     }
@@ -606,49 +566,79 @@
                 <h4 class="text-white font-bold mb-3">📊 구독 플랜</h4>
                 <div class="bg-gray-900 p-3 rounded text-sm text-gray-200">
                     <div class="mb-1"><strong>플랜:</strong> ${escapeHtml(planDisplay)}</div>
-                    <div class="text-gray-500 text-xs">(원본 SKU: ${escapeHtml(q.plan)})</div>
+                    <div class="text-gray-500 text-xs">(SKU: ${escapeHtml(q.plan)})</div>
                 </div></div>`;
 
-            // === 2. Copilot Premium Request Rate Limits (from API headers) ===
-            if (q.copilot_rate_headers && Object.keys(q.copilot_rate_headers).length > 0) {
-                const rh = q.copilot_rate_headers;
-                // Try to find standard rate limit values from headers
-                let limit = null, remaining = null, reset = null;
-                for (const [k, v] of Object.entries(rh)) {
-                    const lk = k.toLowerCase();
-                    if (lk.includes('limit') && !lk.includes('remaining') && !lk.includes('reset')) limit = parseInt(v, 10);
-                    if (lk.includes('remaining')) remaining = parseInt(v, 10);
-                    if (lk.includes('reset')) reset = parseInt(v, 10);
-                }
-                if (limit !== null && remaining !== null) {
-                    const used = limit - remaining;
-                    const pct = limit > 0 ? (remaining / limit * 100) : 0;
-                    const color = remaining > limit * 0.2 ? '#4ade80' : (remaining > limit * 0.05 ? '#facc15' : '#f87171');
+            // === 2. Copilot 할당량 (quota_snapshots from copilot_internal/user) ===
+            if (q.quota_snapshots) {
+                const snap = q.quota_snapshots;
+
+                // 2a. Premium Interactions (메인 할당량)
+                if (snap.premium_interactions) {
+                    const pi = snap.premium_interactions;
+                    const remaining = pi.remaining ?? 0;
+                    const entitlement = pi.entitlement ?? 0;
+                    const used = entitlement - remaining;
+                    const pctRemaining = pi.percent_remaining ?? (entitlement > 0 ? (remaining / entitlement * 100) : 0);
+                    const color = pctRemaining > 70 ? '#4ade80' : (pctRemaining > 30 ? '#facc15' : '#f87171');
+                    const overage = pi.overage_permitted ? '허용' : '비허용';
                     html += `<div class="bg-gray-800 border border-gray-700 rounded-lg p-4 mb-3">
-                        <h4 class="text-white font-bold mb-3">🎯 Copilot 프리미엄 요청 할당량</h4>
+                        <h4 class="text-white font-bold mb-3">🎯 프리미엄 요청 할당량</h4>
                         <div class="bg-gray-900 p-3 rounded text-sm text-gray-300">
-                            <div class="mb-2"><strong>남은 요청:</strong> <span style="color:${color}; font-size:1.2em; font-weight:bold;">${remaining}</span> / ${limit}</div>
-                            <div class="mb-2"><strong>사용한 요청:</strong> ${used}</div>
-                            <div class="bg-gray-700 rounded-full h-3 overflow-hidden"><div style="background:${color}; width:${pct}%; height:100%; transition:width 0.3s;"></div></div>
-                            ${reset ? `<div class="text-gray-500 text-xs mt-2">리셋: ${new Date(reset * 1000).toLocaleString('ko-KR')}</div>` : ''}
+                            <div class="mb-2 flex items-baseline justify-between">
+                                <span><strong>남은 요청:</strong></span>
+                                <span style="color:${color}; font-size:1.4em; font-weight:bold;">${remaining} <span style="font-size:0.6em; color:#9ca3af;">/ ${entitlement}</span></span>
+                            </div>
+                            <div class="bg-gray-700 rounded-full h-3 overflow-hidden mb-2"><div style="background:${color}; width:${pctRemaining}%; height:100%; transition:width 0.3s; border-radius:9999px;"></div></div>
+                            <div class="flex justify-between text-xs text-gray-400">
+                                <span>사용: ${used}회</span>
+                                <span>${pctRemaining.toFixed(1)}% 남음</span>
+                            </div>
+                            ${pi.unlimited ? '<div class="text-green-400 text-xs mt-1 font-bold">♾️ 무제한</div>' : ''}
+                            <div class="text-gray-500 text-xs mt-1">초과 허용: ${overage}</div>
+                            ${pi.reset_date ? `<div class="text-gray-500 text-xs">리셋: ${new Date(pi.reset_date).toLocaleString('ko-KR')}</div>` : ''}
                         </div></div>`;
-                } else {
-                    // Show raw headers if we couldn't parse them cleanly
+                }
+
+                // 2b. Other quotas (chat, completions, etc.)
+                const otherQuotas = Object.entries(snap).filter(([k]) => k !== 'premium_interactions');
+                if (otherQuotas.length > 0) {
+                    let oqHtml = '';
+                    for (const [key, quota] of otherQuotas) {
+                        const label = key.replace(/_/g, ' ');
+                        if (quota.unlimited) {
+                            oqHtml += `<div class="flex items-center justify-between py-2 border-b border-gray-700 last:border-0">
+                                <span class="capitalize text-xs text-gray-300">${escapeHtml(label)}</span>
+                                <span class="text-green-400 text-xs font-bold">♾️ 무제한</span>
+                            </div>`;
+                        } else {
+                            const rem = quota.remaining ?? 0;
+                            const ent = quota.entitlement ?? 0;
+                            const pct = quota.percent_remaining ?? (ent > 0 ? (rem / ent * 100) : 0);
+                            const clr = pct > 70 ? '#4ade80' : (pct > 30 ? '#facc15' : '#f87171');
+                            oqHtml += `<div class="py-2 border-b border-gray-700 last:border-0">
+                                <div class="flex items-center justify-between mb-1">
+                                    <span class="capitalize text-xs text-gray-300">${escapeHtml(label)}</span>
+                                    <span class="text-xs" style="color:${clr};">${rem} / ${ent}</span>
+                                </div>
+                                <div class="bg-gray-700 rounded-full h-1.5 overflow-hidden"><div style="background:${clr}; width:${pct}%; height:100%; border-radius:9999px;"></div></div>
+                            </div>`;
+                        }
+                    }
                     html += `<div class="bg-gray-800 border border-gray-700 rounded-lg p-4 mb-3">
-                        <h4 class="text-white font-bold mb-3">🎯 Copilot API 레이트 리밋 헤더</h4>
-                        <div class="bg-gray-900 p-3 rounded text-xs text-gray-300 font-mono whitespace-pre-wrap">${escapeHtml(JSON.stringify(rh, null, 2))}</div></div>`;
+                        <h4 class="text-white font-bold mb-3">📋 기타 할당량</h4>
+                        <div class="bg-gray-900 p-3 rounded">${oqHtml}</div></div>`;
                 }
             } else {
-                // No rate limit headers - explain why
                 html += `<div class="bg-yellow-950 border border-yellow-800 rounded-lg p-4 mb-3">
-                    <h4 class="text-yellow-300 font-bold mb-2">⚠️ Copilot 프리미엄 요청 할당량</h4>
+                    <h4 class="text-yellow-300 font-bold mb-2">⚠️ 할당량 정보 없음</h4>
                     <div class="text-yellow-200 text-sm">
-                        <p class="mb-1">Copilot API에서 레이트 리밋 헤더를 가져올 수 없었습니다.</p>
-                        <p class="text-yellow-400 text-xs">브라우저 CORS 제한으로 인해 응답 헤더가 노출되지 않을 수 있습니다. 정확한 프리미엄 요청 잔여량은 <a href="https://github.com/settings/copilot" target="_blank" style="color:#60a5fa; text-decoration:underline;">GitHub Copilot 설정 페이지</a>에서 확인하세요.</p>
+                        <p class="mb-1">Copilot 할당량 정보를 가져올 수 없었습니다.</p>
+                        <p class="text-yellow-400 text-xs">이 플랜에서 할당량 API를 지원하지 않거나, 토큰 권한이 부족할 수 있습니다. <a href="https://github.com/settings/copilot" target="_blank" style="color:#60a5fa; text-decoration:underline;">GitHub 설정</a>에서 확인하세요.</p>
                     </div></div>`;
             }
 
-            // === 3. Token endpoint features (from copilot_internal/v2/token response) ===
+            // === 3. Token features (collapsible) ===
             if (q.token_meta && Object.keys(q.token_meta).length > 0) {
                 const tm = q.token_meta;
                 const boolFeatures = [];
@@ -676,46 +666,16 @@
                     featHtml += `<div class="text-xs text-gray-400 font-mono whitespace-pre-wrap mt-2">${escapeHtml(JSON.stringify(otherFields, null, 2))}</div>`;
                 }
                 html += `<details class="bg-gray-800 border border-gray-700 rounded-lg overflow-hidden mb-3">
-                    <summary class="p-4 text-white font-bold cursor-pointer select-none">🔧 Copilot 토큰 기능 상세 (클릭하여 펼치기)</summary>
+                    <summary class="p-4 text-white font-bold cursor-pointer select-none">🔧 토큰 기능 상세 (클릭하여 펼치기)</summary>
                     <div class="px-4 pb-4">${featHtml}</div>
                 </details>`;
             }
 
-            // === 4. JWT extra fields (if decoded) ===
-            const extra = {};
-            for (const [k, v] of Object.entries(q)) {
-                if (!['plan', 'payload', 'github_rate_limit', 'token_meta', 'copilot_rate_headers'].includes(k)) extra[k] = v;
-            }
-            if (Object.keys(extra).length > 0) {
-                html += `<details class="bg-gray-800 border border-gray-700 rounded-lg overflow-hidden mb-3">
-                    <summary class="p-4 text-white font-bold cursor-pointer select-none">📋 토큰 JWT 디코딩 정보 (클릭하여 펼치기)</summary>
-                    <div class="px-4 pb-4"><div class="bg-gray-900 p-3 rounded text-xs text-gray-300 font-mono whitespace-pre-wrap">${escapeHtml(JSON.stringify(extra, null, 2))}</div></div>
-                </details>`;
-            }
-
-            // === 5. GitHub REST API rate limit (collapsible — NOT Copilot quota) ===
-            if (q.github_rate_limit?.resources?.core) {
-                const c = q.github_rate_limit.resources.core;
-                const pct = c.limit > 0 ? (c.remaining / c.limit * 100) : 0;
-                const color = c.remaining > c.limit * 0.2 ? '#4ade80' : '#f87171';
-                html += `<details class="bg-gray-800 border border-gray-700 rounded-lg overflow-hidden mb-3">
-                    <summary class="p-4 text-gray-400 font-bold cursor-pointer select-none text-sm">ℹ️ GitHub REST API 레이트 리밋 (Copilot 할당량과 무관)</summary>
-                    <div class="px-4 pb-4">
-                        <div class="bg-gray-900 p-3 rounded text-sm text-gray-400">
-                            <div class="text-yellow-600 text-xs mb-2">⚠️ 이것은 GitHub REST API 호출 제한이며, Copilot 프리미엄 요청 할당량과는 별개입니다.</div>
-                            <div class="mb-2"><strong>Core:</strong> ${c.remaining} / ${c.limit} 남음</div>
-                            <div class="bg-gray-700 rounded-full h-2 overflow-hidden"><div style="background:${color}; width:${pct}%; height:100%; transition:width 0.3s;"></div></div>
-                            <div class="text-gray-600 text-xs mt-1">리셋: ${new Date(c.reset * 1000).toLocaleTimeString('ko-KR')}</div>
-                        </div>
-                    </div>
-                </details>`;
-            }
-
-            // === 6. JWT raw payload (if decoded) ===
-            if (q.payload) {
+            // === 4. Raw API response (collapsible) ===
+            if (q.copilot_user) {
                 html += `<details class="bg-gray-800 border border-gray-700 rounded-lg overflow-hidden">
-                    <summary class="p-4 text-white font-bold cursor-pointer select-none">토큰 원본 페이로드 (클릭하여 펼치기)</summary>
-                    <div class="px-4 pb-4"><div class="bg-gray-900 p-3 rounded max-h-72 overflow-y-auto font-mono text-[11px] text-gray-500 whitespace-pre-wrap break-all">${escapeHtml(JSON.stringify(q.payload, null, 2))}</div></div>
+                    <summary class="p-4 text-gray-400 font-bold cursor-pointer select-none text-sm">🔍 API 원본 응답 (클릭하여 펼치기)</summary>
+                    <div class="px-4 pb-4"><div class="bg-gray-900 p-3 rounded max-h-72 overflow-y-auto font-mono text-[11px] text-gray-500 whitespace-pre-wrap break-all">${escapeHtml(JSON.stringify(q.copilot_user, null, 2))}</div></div>
                 </details>`;
             }
 
@@ -848,5 +808,5 @@
         }
     });
 
-    console.log(`${LOG_TAG} Settings tab registered (v1.4.0) — sidebar: 🔑 Copilot`);
+    console.log(`${LOG_TAG} Settings tab registered (v1.5.0) — sidebar: 🔑 Copilot`);
 })();
