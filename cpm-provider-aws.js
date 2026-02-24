@@ -1,5 +1,5 @@
 // @name CPM Provider - AWS Bedrock
-// @version 1.1.1
+// @version 1.1.2
 // @description AWS Bedrock (Claude) provider for Cupcake PM
 // @icon 🔶
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-aws.js
