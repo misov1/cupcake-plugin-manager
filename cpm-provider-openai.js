@@ -1,5 +1,5 @@
 // @name CPM Provider - OpenAI
-// @version 1.0.2
+// @version 1.1.0
 // @description OpenAI provider for Cupcake PM
 // @icon 🟢
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-openai.js
