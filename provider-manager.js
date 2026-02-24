@@ -110,6 +110,7 @@ let CUSTOM_MODELS_CACHE = [];
 const customFetchers = {};
 const registeredProviderTabs = [];
 let vertexTokenCache = { token: null, expiry: 0 };
+const pendingDynamicFetchers = [];
 
 // ==========================================
 // 3.1 PERSISTENT SETTINGS BACKUP (survives plugin deletion)
@@ -392,12 +393,15 @@ const SubPluginManager = {
 window.CupcakePM = {
     customFetchers,
     registeredProviderTabs,
-    registerProvider({ name, models, fetcher, settingsTab }) {
+    registerProvider({ name, models, fetcher, settingsTab, fetchDynamicModels }) {
         if (fetcher) customFetchers[name] = fetcher;
         if (models && Array.isArray(models)) {
             for (const m of models) ALL_DEFINED_MODELS.push({ ...m, provider: name });
         }
         if (settingsTab) registeredProviderTabs.push(settingsTab);
+        if (typeof fetchDynamicModels === 'function') {
+            pendingDynamicFetchers.push({ name, fetchDynamicModels });
+        }
         console.log(`[CupcakePM] Provider registered: ${name}`);
     },
     formatToOpenAI,
@@ -781,6 +785,25 @@ async function handleRequest(args, activeModelDef) {
             console.log(`[CPM] Auto-restored ${restoredCount} settings from persistent backup.`);
         }
 
+        // ===== Dynamic Model Fetching (공식 API에서 모델 목록 자동 갱신) =====
+        for (const { name, fetchDynamicModels } of pendingDynamicFetchers) {
+            try {
+                console.log(`[CupcakePM] Fetching dynamic models for ${name}...`);
+                const dynamicModels = await fetchDynamicModels();
+                if (dynamicModels && Array.isArray(dynamicModels) && dynamicModels.length > 0) {
+                    ALL_DEFINED_MODELS = ALL_DEFINED_MODELS.filter(m => m.provider !== name);
+                    for (const m of dynamicModels) {
+                        ALL_DEFINED_MODELS.push({ ...m, provider: name });
+                    }
+                    console.log(`[CupcakePM] ✓ Dynamic models for ${name}: ${dynamicModels.length} models`);
+                } else {
+                    console.log(`[CupcakePM] No dynamic models for ${name}, using fallback.`);
+                }
+            } catch (e) {
+                console.warn(`[CupcakePM] Dynamic fetch failed for ${name}:`, e.message || e);
+            }
+        }
+
         // Custom models migration
         const customModelsJson = await safeGetArg('cpm_custom_models', '[]');
         try {
@@ -1112,22 +1135,6 @@ async function handleRequest(args, activeModelDef) {
                     </div>
 
                     <div id="tab-plugins" class="cpm-tab-content hidden">
-                        <!-- Main Plugin Self-Update Section -->
-                        <div class="bg-gradient-to-r from-blue-900/40 to-purple-900/40 border border-blue-700/50 rounded-lg p-5 mb-6">
-                            <div class="flex justify-between items-center">
-                                <div>
-                                    <h4 class="text-lg font-bold text-blue-300 flex items-center space-x-2">
-                                        <span>🧁</span>
-                                        <span>Cupcake Provider Manager</span>
-                                        <span class="bg-blue-800 text-blue-200 text-xs px-2 py-0.5 rounded-full">v${CPM_VERSION}</span>
-                                    </h4>
-                                    <p class="text-sm text-gray-400 mt-1">메인 플러그인의 최신 버전을 확인합니다.</p>
-                                </div>
-                                <button id="cpm-main-update-btn" class="bg-blue-600 hover:bg-blue-500 text-white font-semibold py-2 px-4 rounded transition-colors text-sm shadow whitespace-nowrap">🔍 최신 버전 확인</button>
-                            </div>
-                            <div id="cpm-main-update-status" class="mt-3 hidden"></div>
-                        </div>
-
                         <div class="flex justify-between items-center mb-6 pb-3 border-b border-gray-700">
                             <h3 class="text-3xl font-bold text-gray-400">Sub-Plugins Manager</h3>
                             <button id="cpm-check-updates-btn" class="bg-indigo-600 hover:bg-indigo-500 text-white font-semibold py-2 px-4 rounded transition-colors text-sm shadow">🔄 서브 플러그인 업데이트 확인</button>
@@ -1304,55 +1311,6 @@ async function handleRequest(args, activeModelDef) {
                     }
                 }
             };
-
-            // Main Plugin Self-Update Check
-            const MAIN_PLUGIN_UPDATE_URL = 'https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/provider-manager.js';
-            const mainUpdateBtn = document.getElementById('cpm-main-update-btn');
-            const mainUpdateStatus = document.getElementById('cpm-main-update-status');
-            if (mainUpdateBtn) {
-                // Auto-check on tab open
-                const checkMainUpdate = async () => {
-                    mainUpdateBtn.disabled = true;
-                    mainUpdateBtn.textContent = '⏳ 확인 중...';
-                    mainUpdateStatus.classList.remove('hidden');
-                    mainUpdateStatus.innerHTML = '<p class="text-gray-400 text-sm">최신 버전을 확인하고 있습니다...</p>';
-                    try {
-                        const cacheBuster = MAIN_PLUGIN_UPDATE_URL + '?_t=' + Date.now();
-                        const res = await fetch(cacheBuster, { method: 'GET', cache: 'no-store' });
-                        if (!res.ok) throw new Error('HTTP ' + res.status);
-                        const remoteCode = await res.text();
-                        const verMatch = remoteCode.match(/\/\/@version\s+([^\s]+)/);
-                        if (!verMatch || !verMatch[1]) throw new Error('Version not found in remote file');
-                        const remoteVersion = verMatch[1].trim();
-                        const cmp = SubPluginManager.compareVersions(CPM_VERSION, remoteVersion);
-                        if (cmp > 0) {
-                            mainUpdateStatus.innerHTML = `
-                                <div class="bg-green-900/40 border border-green-600/50 rounded p-3 space-y-2">
-                                    <p class="text-green-300 text-sm font-bold">🎉 새 버전 발견! v${CPM_VERSION} → <span class="text-green-200">v${remoteVersion}</span></p>
-                                    <p class="text-gray-400 text-xs">아래 버튼을 눌러 파일을 다운로드한 후, RisuAI 설정 → 플러그인에서 다시 설치해주세요.</p>
-                                    <div class="flex space-x-2 mt-2">
-                                        <a href="${MAIN_PLUGIN_UPDATE_URL}" download="provider-manager.js" class="bg-green-600 hover:bg-green-500 text-white text-xs font-bold px-4 py-2 rounded inline-block no-underline">⬇️ 최신 버전 다운로드 (v${remoteVersion})</a>
-                                        <button id="cpm-main-copy-url" class="bg-gray-600 hover:bg-gray-500 text-white text-xs font-bold px-4 py-2 rounded">📋 URL 복사</button>
-                                    </div>
-                                </div>`;
-                            const copyBtn = document.getElementById('cpm-main-copy-url');
-                            if (copyBtn) {
-                                copyBtn.addEventListener('click', () => {
-                                    try { navigator.clipboard.writeText(MAIN_PLUGIN_UPDATE_URL); copyBtn.textContent = '✅ 복사됨!'; } catch(e) { copyBtn.textContent = '❌ 실패'; }
-                                });
-                            }
-                        } else {
-                            mainUpdateStatus.innerHTML = '<p class="text-blue-300 text-sm font-semibold">✅ 현재 최신 버전입니다. (v' + CPM_VERSION + ')</p>';
-                        }
-                    } catch (err) {
-                        console.error('[CPM Main Update]', err);
-                        mainUpdateStatus.innerHTML = '<p class="text-red-400 text-sm">❌ 업데이트 확인 실패: ' + err.message + '</p>';
-                    }
-                    mainUpdateBtn.disabled = false;
-                    mainUpdateBtn.textContent = '🔍 최신 버전 확인';
-                };
-                mainUpdateBtn.addEventListener('click', checkMainUpdate);
-            }
 
             container.appendChild(sidebar);
             container.appendChild(content);

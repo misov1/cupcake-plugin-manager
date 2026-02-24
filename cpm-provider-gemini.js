@@ -19,6 +19,49 @@
     CPM.registerProvider({
         name: 'GoogleAI',
         models: GEMINI_MODELS,
+        fetchDynamicModels: async () => {
+            try {
+                const key = await CPM.safeGetArg('cpm_gemini_key');
+                if (!key) return null;
+
+                let allModels = [];
+                let pageToken = null;
+
+                // Paginate through all available models
+                while (true) {
+                    let url = `https://generativelanguage.googleapis.com/v1beta/models?key=${key}&pageSize=100`;
+                    if (pageToken) url += `&pageToken=${encodeURIComponent(pageToken)}`;
+
+                    const res = await Risuai.nativeFetch(url, { method: 'GET' });
+                    if (!res.ok) return null;
+
+                    const data = await res.json();
+                    if (data.models) allModels = allModels.concat(data.models);
+                    if (!data.nextPageToken) break;
+                    pageToken = data.nextPageToken;
+                }
+
+                return allModels
+                    .filter(m => {
+                        // Only include models that support generateContent (chat/generation)
+                        if (!m.supportedGenerationMethods?.includes('generateContent')) return false;
+                        // Only include gemini models
+                        const id = (m.name || '').replace('models/', '');
+                        return id.startsWith('gemini-');
+                    })
+                    .map(m => {
+                        const id = m.name.replace('models/', '');
+                        return {
+                            uniqueId: `google-${id}`,
+                            id: id,
+                            name: m.displayName || id
+                        };
+                    });
+            } catch (e) {
+                console.warn('[CPM-Gemini] Dynamic model fetch error:', e);
+                return null;
+            }
+        },
         fetcher: async function (modelDef, messages, temp, maxTokens, args) {
             const config = {
                 key: await CPM.safeGetArg('cpm_gemini_key'),

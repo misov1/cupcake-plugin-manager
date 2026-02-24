@@ -22,6 +22,48 @@
             { uniqueId: 'openai-gpt-5.2-2025-12-11', id: 'gpt-5.2-2025-12-11', name: 'GPT-5.2 (2025/12/11)' },
             { uniqueId: 'openai-gpt-5.2-chat-latest', id: 'gpt-5.2-chat-latest', name: 'GPT-5.2 Chat (Latest)' },
         ],
+        fetchDynamicModels: async () => {
+            try {
+                const key = await CPM.safeGetArg('cpm_openai_key');
+                if (!key) return null;
+
+                const res = await Risuai.nativeFetch('https://api.openai.com/v1/models', {
+                    method: 'GET',
+                    headers: { 'Authorization': `Bearer ${key}` }
+                });
+                if (!res.ok) return null;
+
+                const data = await res.json();
+                if (!data.data) return null;
+
+                // Filter to chat-capable models only
+                const INCLUDE_PREFIXES = ['gpt-4', 'gpt-5', 'chatgpt-', 'o1', 'o3', 'o4'];
+                const EXCLUDE_KEYWORDS = ['audio', 'realtime', 'search', 'transcribe', 'instruct', 'embedding', 'tts', 'whisper', 'dall-e'];
+
+                const chatModels = data.data.filter(m => {
+                    const id = m.id;
+                    const included = INCLUDE_PREFIXES.some(pfx => id.startsWith(pfx));
+                    if (!included) return false;
+                    const excluded = EXCLUDE_KEYWORDS.some(kw => id.toLowerCase().includes(kw));
+                    return !excluded;
+                });
+
+                return chatModels.map(m => {
+                    let name = m.id;
+                    const dateMatch = m.id.match(/-(\d{4})-(\d{2})-(\d{2})$/);
+                    if (dateMatch) {
+                        name = m.id.replace(/-\d{4}-\d{2}-\d{2}$/, '') + ` (${dateMatch[1]}/${dateMatch[2]}/${dateMatch[3]})`;
+                    } else if (m.id.endsWith('-latest')) {
+                        name = m.id.replace(/-latest$/, '') + ' (Latest)';
+                    }
+                    name = name.replace(/^gpt-/i, 'GPT-').replace(/^chatgpt-/i, 'ChatGPT-');
+                    return { uniqueId: `openai-${m.id}`, id: m.id, name };
+                });
+            } catch (e) {
+                console.warn('[CPM-OpenAI] Dynamic model fetch error:', e);
+                return null;
+            }
+        },
         fetcher: async function (modelDef, messages, temp, maxTokens, args) {
             const config = {
                 url: await CPM.safeGetArg('cpm_openai_url'),

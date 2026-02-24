@@ -14,6 +14,31 @@
             { uniqueId: 'deepseek-chat', id: 'deepseek-chat', name: 'Deepseek Chat' },
             { uniqueId: 'deepseek-reasoner', id: 'deepseek-reasoner', name: 'Deepseek Reasoner' },
         ],
+        fetchDynamicModels: async () => {
+            try {
+                const key = await CPM.safeGetArg('cpm_deepseek_key');
+                if (!key) return null;
+
+                const res = await Risuai.nativeFetch('https://api.deepseek.com/models', {
+                    method: 'GET',
+                    headers: { 'Authorization': `Bearer ${key}` }
+                });
+                if (!res.ok) return null;
+
+                const data = await res.json();
+                if (!data.data) return null;
+
+                return data.data.map(m => {
+                    // Format name: "deepseek-chat" -> "DeepSeek Chat"
+                    let name = m.id.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+                    name = name.replace(/^Deepseek/i, 'DeepSeek');
+                    return { uniqueId: `deepseek-${m.id}`, id: m.id, name };
+                });
+            } catch (e) {
+                console.warn('[CPM-DeepSeek] Dynamic model fetch error:', e);
+                return null;
+            }
+        },
         fetcher: async function (modelDef, messages, temp, maxTokens, args) {
             const config = {
                 url: await CPM.safeGetArg('cpm_deepseek_url'),

@@ -38,6 +38,45 @@
     CPM.registerProvider({
         name: 'Anthropic',
         models,
+        fetchDynamicModels: async () => {
+            try {
+                const key = await CPM.safeGetArg('cpm_anthropic_key');
+                if (!key) return null;
+
+                let allModels = [];
+                let afterId = null;
+
+                // Paginate through all available models
+                while (true) {
+                    let url = 'https://api.anthropic.com/v1/models?limit=100';
+                    if (afterId) url += `&after_id=${encodeURIComponent(afterId)}`;
+
+                    const res = await Risuai.nativeFetch(url, {
+                        method: 'GET',
+                        headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' }
+                    });
+                    if (!res.ok) return null;
+
+                    const data = await res.json();
+                    if (data.data) allModels = allModels.concat(data.data);
+                    if (!data.has_more) break;
+                    afterId = data.last_id;
+                }
+
+                return allModels
+                    .filter(m => m.type === 'model')
+                    .map(m => {
+                        let name = m.display_name || m.id;
+                        // Append date suffix if present (e.g., "20251001" -> "2025/10/01")
+                        const dateMatch = m.id.match(/(\d{4})(\d{2})(\d{2})$/);
+                        if (dateMatch) name += ` (${dateMatch[1]}/${dateMatch[2]}/${dateMatch[3]})`;
+                        return { uniqueId: `anthropic-${m.id}`, id: m.id, name };
+                    });
+            } catch (e) {
+                console.warn('[CPM-Anthropic] Dynamic model fetch error:', e);
+                return null;
+            }
+        },
         fetcher: async function (modelDef, messages, temp, maxTokens, args) {
             const config = {
                 url: await CPM.safeGetArg('cpm_anthropic_url'),
