@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.8.7
+//@version 1.8.8
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.8.7';
+const CPM_VERSION = '1.8.8';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -390,10 +390,13 @@ const SubPluginManager = {
         const p = this.plugins.find(x => x.id === pluginId);
         if (!p) return false;
         try {
-            // Fetch the individual file code (single request, no proxy cache collision)
+            // Use plain fetch (not Risuai.nativeFetch) — GitHub raw supports CORS (Access-Control-Allow-Origin: *)
+            // so direct fetch works from the sandboxed iframe. Risuai.nativeFetch goes through proxy2 which
+            // can corrupt or cache GET responses incorrectly. Do NOT add custom headers — they trigger
+            // CORS preflight which raw.githubusercontent.com does not support.
             const fileUrl = `https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/${remoteFile}?_t=${Date.now()}`;
             console.log(`[CPM Update] Downloading ${p.name} from: ${fileUrl}`);
-            const res = await Risuai.nativeFetch(fileUrl, { method: 'GET' });
+            const res = await fetch(fileUrl, { method: 'GET', cache: 'no-store' });
             if (!res.ok) {
                 console.error(`[CPM Update] Failed to download ${p.name}: ${res.status}`);
                 return false;
