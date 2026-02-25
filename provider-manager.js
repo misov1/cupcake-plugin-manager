@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.8.4
+//@version 1.8.5
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.8.4';
+const CPM_VERSION = '1.8.5';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -342,22 +342,29 @@ const SubPluginManager = {
         const url = plugin.updateUrl;
         if (!url) return null;
         try {
-            // Use Risuai.risuFetch — direct fetch() is blocked by iframe CSP,
-            // and nativeFetch goes through proxy2 which caches incorrectly
-            const cacheBuster = url + (url.includes('?') ? '&' : '?') + '_t=' + Date.now();
-            const res = await Risuai.risuFetch(cacheBuster, {
+            // nativeFetch goes through the V3 bridge to the host, bypassing iframe CSP.
+            // Add unique random + timestamp cache buster to prevent proxy caching issues.
+            const cacheBuster = url + (url.includes('?') ? '&' : '?') + '_t=' + Date.now() + '_r=' + Math.random().toString(36).substr(2, 8);
+            console.log(`[CPM Update] Checking ${plugin.name}: ${cacheBuster}`);
+            const res = await Risuai.nativeFetch(cacheBuster, {
                 method: 'GET'
             });
+            console.log(`[CPM Update] Response for ${plugin.name}: ok=${res.ok}, status=${res.status}`);
             if (!res.ok) return null;
-            const remoteCode = typeof res.data === 'string' ? res.data : JSON.stringify(res.data);
+            const remoteCode = await res.text();
+            console.log(`[CPM Update] Got ${remoteCode.length} chars for ${plugin.name}, first 80: ${remoteCode.substring(0, 80)}`);
             const remoteMeta = this.extractMetadata(remoteCode);
-            if (!remoteMeta.version) return null;
+            if (!remoteMeta.version) {
+                console.warn(`[CPM Update] No version found in remote code for ${plugin.name}`);
+                return null;
+            }
             // Validate that the remote file matches this plugin (name check)
             if (remoteMeta.name !== plugin.name) {
                 console.warn(`[CPM Update] Name mismatch for ${plugin.name}: remote has "${remoteMeta.name}". Skipping.`);
                 return null;
             }
             const cmp = this.compareVersions(plugin.version || '0.0.0', remoteMeta.version);
+            console.log(`[CPM Update] ${plugin.name}: local=${plugin.version} remote=${remoteMeta.version} cmp=${cmp}`);
             return {
                 hasUpdate: cmp > 0,
                 remoteVersion: remoteMeta.version,
