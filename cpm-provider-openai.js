@@ -99,7 +99,7 @@
                 headers['Editor-Plugin-Version'] = 'copilot-chat/0.11.1';
             }
 
-            const res = await Risuai.nativeFetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: abortSignal });
+            const res = await Risuai.nativeFetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
             if (!res.ok) return { success: false, content: `[OpenAI Error ${res.status}] ${await res.text()}` };
             return { success: true, content: CPM.createSSEStream(res, CPM.parseOpenAISSELine, abortSignal) };
         },

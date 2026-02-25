@@ -84,7 +84,7 @@
             if (systemInstruction.length > 0) body.systemInstruction = { parts: systemInstruction.map(text => ({ text })) };
             if (config.thinking && config.thinking !== 'off') body.generationConfig.thinkingConfig = { thinkingBudget: 8192 };
 
-            const res = await Risuai.nativeFetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: abortSignal });
+            const res = await Risuai.nativeFetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
             if (!res.ok) return { success: false, content: `[Gemini Error ${res.status}] ${await res.text()}` };
             return { success: true, content: CPM.createSSEStream(res, (line) => CPM.parseGeminiSSELine(line, config), abortSignal) };
         },

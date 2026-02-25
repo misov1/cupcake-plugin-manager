@@ -183,8 +183,7 @@
             const res = await Risuai.nativeFetch(url, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` },
-                body: JSON.stringify(body),
-                signal: abortSignal
+                body: JSON.stringify(body)
             });
             if (!res.ok) {
                 if (res.status === 401 || res.status === 403) CPM.vertexTokenCache = { token: null, expiry: 0 };

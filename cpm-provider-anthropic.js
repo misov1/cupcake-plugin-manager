@@ -125,8 +125,7 @@
             const res = await Risuai.nativeFetch(url, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'x-api-key': config.key, 'anthropic-version': '2023-06-01' },
-                body: JSON.stringify(body),
-                signal: abortSignal
+                body: JSON.stringify(body)
             });
             if (!res.ok) return { success: false, content: `[Anthropic Error ${res.status}] ${await res.text()}` };
             return { success: true, content: CPM.createAnthropicSSEStream(res, abortSignal) };

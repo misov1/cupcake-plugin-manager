@@ -55,8 +55,7 @@
             const res = await Risuai.nativeFetch(url, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.key}` },
-                body: JSON.stringify(body),
-                signal: abortSignal
+                body: JSON.stringify(body)
             });
             if (!res.ok) return { success: false, content: await res.text() };
             return { success: true, content: CPM.createSSEStream(res, CPM.parseOpenAISSELine, abortSignal) };

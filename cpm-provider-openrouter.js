@@ -44,8 +44,7 @@
                     'HTTP-Referer': 'https://risuai.xyz',
                     'X-Title': 'RisuAI - CPM'
                 },
-                body: JSON.stringify(body),
-                signal: abortSignal
+                body: JSON.stringify(body)
             });
             if (!res.ok) return { success: false, content: await res.text() };
             return { success: true, content: CPM.createSSEStream(res, CPM.parseOpenAISSELine, abortSignal) };

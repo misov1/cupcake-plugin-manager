@@ -174,8 +174,7 @@
                 const res = await Risuai.nativeFetch(signed.url.toString(), {
                     method: signed.method,
                     headers: signed.headers,
-                    body: signed.body,
-                    signal: abortSignal
+                    body: signed.body
                 });
 
                 if (!res.ok) return { success: false, content: `[AWS Bedrock Error ${res.status}] ${await res.text()}` };
@@ -224,7 +223,7 @@
                                         if (deltaMatch) {
                                             try {
                                                 controller.enqueue(JSON.parse('"' + deltaMatch[1] + '"'));
-                                            } catch {}
+                                            } catch { }
                                         }
                                     }
                                 }
