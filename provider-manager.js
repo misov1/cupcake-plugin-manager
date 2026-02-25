@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.8.9
+//@version 1.9.0
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.8.9';
+const CPM_VERSION = '1.9.0';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -339,16 +339,22 @@ const SubPluginManager = {
 
     // ── Manifest-based Update System ──
     // RisuAI's proxy2 caches ALL requests to the same domain with the first response.
-    // So we fetch ONE versions.json manifest to check all versions at once.
-    // Individual file code is fetched on-demand in applyUpdate (single request = no cache collision).
+    // This means we can only make ONE nativeFetch per domain per session.
+    //
+    // Strategy: 2-phase approach using 2 different domains
+    //   Phase 1: Fetch versions.json from VERCEL to check which plugins need updating
+    //   Phase 2: Fetch code-bundle.json from GITHUB RAW (ONE request) containing ALL plugin code
+    //
+    // This way applyUpdate never needs to fetch — it uses the pre-fetched code.
 
-    // Manifest hosted on Vercel (different domain from GitHub raw where individual files are fetched)
-    // This avoids proxy2 per-domain caching collision
     MANIFEST_URL: 'https://cupcake-plugin-manager.vercel.app/versions.json',
+    CODE_BUNDLE_URL: 'https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/code-bundle.json',
 
-    // Check all plugins for updates using the manifest. Returns array of { plugin, remoteVersion, localVersion }.
+    // Check all plugins for updates. If updates found, pre-fetches ALL code in one request.
+    // Returns array of { plugin, remoteVersion, localVersion, code }.
     async checkAllUpdates() {
         try {
+            // Phase 1: Fetch version manifest from Vercel (ONE request to Vercel domain)
             const cacheBuster = this.MANIFEST_URL + '?_t=' + Date.now() + '_r=' + Math.random().toString(36).substr(2, 8);
             console.log(`[CPM Update] Fetching version manifest: ${cacheBuster}`);
             const res = await Risuai.nativeFetch(cacheBuster, { method: 'GET' });
@@ -375,9 +381,42 @@ const SubPluginManager = {
                         remoteVersion: remote.version,
                         localVersion: p.version || '0.0.0',
                         remoteFile: remote.file,
+                        code: null, // will be filled from bundle
                     });
                 }
             }
+
+            // Phase 2: If any updates found, pre-fetch code bundle from GitHub raw (ONE request)
+            if (results.length > 0) {
+                try {
+                    const bundleBuster = this.CODE_BUNDLE_URL + '?_t=' + Date.now() + '_r=' + Math.random().toString(36).substr(2, 8);
+                    console.log(`[CPM Update] Fetching code bundle: ${bundleBuster}`);
+                    let bundleRes;
+                    try {
+                        bundleRes = await fetch(bundleBuster, { method: 'GET', cache: 'no-store' });
+                    } catch (fetchErr) {
+                        console.log(`[CPM Update] Direct fetch for bundle blocked (CSP), falling back to nativeFetch`);
+                        bundleRes = await Risuai.nativeFetch(bundleBuster, { method: 'GET' });
+                    }
+                    if (bundleRes.ok) {
+                        const codeBundle = await bundleRes.json();
+                        console.log(`[CPM Update] Code bundle loaded (${Object.keys(codeBundle).length} files)`);
+                        for (const u of results) {
+                            if (u.remoteFile && codeBundle[u.remoteFile]) {
+                                u.code = codeBundle[u.remoteFile];
+                                console.log(`[CPM Update] Pre-fetched code for ${u.plugin.name} (${(u.code.length / 1024).toFixed(1)}KB)`);
+                            } else {
+                                console.warn(`[CPM Update] ${u.plugin.name} (${u.remoteFile}) not found in code bundle`);
+                            }
+                        }
+                    } else {
+                        console.error(`[CPM Update] Failed to fetch code bundle: ${bundleRes.status}`);
+                    }
+                } catch (bundleErr) {
+                    console.error(`[CPM Update] Code bundle fetch error:`, bundleErr);
+                }
+            }
+
             return results;
         } catch (e) {
             console.error(`[CPM Update] Failed to check updates:`, e);
@@ -385,44 +424,31 @@ const SubPluginManager = {
         }
     },
 
-    // Fetch and apply update for a specific plugin. Downloads the individual file on-demand.
-    async applyUpdate(pluginId, remoteFile) {
+    // Apply update using pre-fetched code from the bundle (no additional fetch needed).
+    // Code is pre-fetched during checkAllUpdates to avoid proxy2 per-domain cache issues.
+    async applyUpdate(pluginId, prefetchedCode) {
         const p = this.plugins.find(x => x.id === pluginId);
         if (!p) return false;
+        if (!prefetchedCode) {
+            console.error(`[CPM Update] No pre-fetched code available for ${p.name}. Re-run update check.`);
+            return false;
+        }
         try {
-            // Smart fetch: try direct fetch first (works in Tauri/desktop where CSP isn't restrictive),
-            // fall back to Risuai.nativeFetch for web (about:srcdoc iframe) where CSP blocks
-            // connect-src to raw.githubusercontent.com. nativeFetch routes through the parent window
-            // via postMessage, bypassing iframe CSP restrictions.
-            // Cache-buster param ensures proxy2 treats each request as unique.
-            const fileUrl = `https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/${remoteFile}?_t=${Date.now()}_r=${Math.random().toString(36).substr(2, 6)}`;
-            console.log(`[CPM Update] Downloading ${p.name} from: ${fileUrl}`);
-            let res;
-            try {
-                res = await fetch(fileUrl, { method: 'GET', cache: 'no-store' });
-            } catch (fetchErr) {
-                // Direct fetch blocked by CSP or network error — fall back to nativeFetch
-                console.log(`[CPM Update] Direct fetch blocked (CSP/network), falling back to nativeFetch for ${p.name}`);
-                res = await Risuai.nativeFetch(fileUrl, { method: 'GET' });
-            }
-            if (!res.ok) {
-                console.error(`[CPM Update] Failed to download ${p.name}: ${res.status}`);
-                return false;
-            }
-            const newCode = await res.text();
-            const meta = this.extractMetadata(newCode);
+            console.log(`[CPM Update] Applying update for ${p.name} (${(prefetchedCode.length / 1024).toFixed(1)}KB)`);
+            const meta = this.extractMetadata(prefetchedCode);
             // Safety check: verify the remote code's name matches the plugin being updated
             if (meta.name && p.name && meta.name !== p.name) {
                 console.error(`[CPM Update] BLOCKED: Tried to apply "${meta.name}" code to plugin "${p.name}". Names don't match.`);
                 return false;
             }
-            p.code = newCode;
+            p.code = prefetchedCode;
             p.name = meta.name || p.name;
             p.version = meta.version;
             p.description = meta.description;
             p.icon = meta.icon;
             p.updateUrl = meta.updateUrl || p.updateUrl;
             await this.saveRegistry();
+            console.log(`[CPM Update] Successfully applied update for ${p.name} → v${meta.version}`);
             return true;
         } catch (e) {
             console.error(`[CPM Update] Failed to apply update for ${p.name}:`, e);
@@ -1761,11 +1787,16 @@ async function handleRequest(args, activeModelDef, abortSignal) {
                                 let html = `<div class="bg-indigo-900/30 rounded p-3 space-y-3">`;
                                 html += `<p class="text-indigo-300 text-sm font-semibold">🔔 ${updates.length}개의 업데이트가 있습니다.</p>`;
                                 for (const u of updates) {
-                                    pendingUpdates.set(u.plugin.id, { remoteFile: u.remoteFile, name: u.plugin.name });
+                                    pendingUpdates.set(u.plugin.id, { code: u.code, name: u.plugin.name });
+                                    const hasCode = !!u.code;
                                     html += `<div class="flex items-center justify-between bg-gray-800 rounded p-2">`;
                                     html += `<div><span class="text-white font-semibold">${u.plugin.icon || '🧩'} ${u.plugin.name}</span>`;
                                     html += `<span class="text-gray-400 text-xs ml-2">v${u.localVersion} → <span class="text-green-400">v${u.remoteVersion}</span></span></div>`;
-                                    html += `<button class="cpm-apply-update bg-green-600 hover:bg-green-500 text-white text-xs font-bold px-3 py-1 rounded" data-id="${u.plugin.id}">⬆️ 업데이트</button>`;
+                                    if (hasCode) {
+                                        html += `<button class="cpm-apply-update bg-green-600 hover:bg-green-500 text-white text-xs font-bold px-3 py-1 rounded" data-id="${u.plugin.id}">⬆️ 업데이트</button>`;
+                                    } else {
+                                        html += `<span class="text-red-400 text-xs">⚠️ 코드 다운로드 실패</span>`;
+                                    }
                                     html += `</div>`;
                                 }
                                 html += `</div>`;
@@ -1775,10 +1806,10 @@ async function handleRequest(args, activeModelDef, abortSignal) {
                                     btn.addEventListener('click', async (e) => {
                                         const id = e.target.getAttribute('data-id');
                                         const updateData = pendingUpdates.get(id);
-                                        if (!updateData) { e.target.textContent = '❌ 데이터 없음'; return; }
+                                        if (!updateData || !updateData.code) { e.target.textContent = '❌ 코드 없음'; return; }
                                         e.target.disabled = true;
-                                        e.target.textContent = '⏳ 다운로드 중...';
-                                        const ok = await SubPluginManager.applyUpdate(id, updateData.remoteFile);
+                                        e.target.textContent = '⏳ 적용 중...';
+                                        const ok = await SubPluginManager.applyUpdate(id, updateData.code);
                                         if (ok) {
                                             // Hot-reload: 즉시 적용 (새로고침 불필요)
                                             await SubPluginManager.hotReload(id);
