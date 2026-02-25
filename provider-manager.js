@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.8.2
+//@version 1.8.3
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.8.2';
+const CPM_VERSION = '1.8.3';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -342,14 +342,10 @@ const SubPluginManager = {
         const url = plugin.updateUrl;
         if (!url) return null;
         try {
-            // Use native fetch (not Risuai.nativeFetch which goes through a caching proxy)
-            // GitHub raw URLs support CORS, so direct fetch works fine
+            // Use Risuai.nativeFetch — direct fetch() is blocked by iframe CSP (about:srcdoc)
             const cacheBuster = url + (url.includes('?') ? '&' : '?') + '_t=' + Date.now();
-            // Do NOT add custom headers (e.g. Cache-Control) — they trigger CORS preflight
-            // which raw.githubusercontent.com does not support. The _t= param handles cache busting.
-            const res = await fetch(cacheBuster, {
-                method: 'GET',
-                cache: 'no-store'
+            const res = await Risuai.nativeFetch(cacheBuster, {
+                method: 'GET'
             });
             if (!res.ok) return null;
             const remoteCode = await res.text();
