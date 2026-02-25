@@ -342,7 +342,9 @@ const SubPluginManager = {
     // So we fetch ONE versions.json manifest to check all versions at once.
     // Individual file code is fetched on-demand in applyUpdate (single request = no cache collision).
 
-    MANIFEST_URL: 'https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/versions.json',
+    // Manifest hosted on Vercel (different domain from GitHub raw where individual files are fetched)
+    // This avoids proxy2 per-domain caching collision
+    MANIFEST_URL: 'https://cupcake-plugin-manager.vercel.app/versions.json',
 
     // Check all plugins for updates using the manifest. Returns array of { plugin, remoteVersion, localVersion }.
     async checkAllUpdates() {
