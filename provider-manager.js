@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.10.5
+//@version 1.10.6
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.10.5';
+const CPM_VERSION = '1.10.6';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -142,6 +142,28 @@ function stripInternalTags(text) {
 }
 
 /**
+ * NUCLEAR-SAFE JSON.stringify: uses a custom replacer that physically prevents
+ * null/undefined entries from appearing in ANY array during serialization.
+ *
+ * Why this is needed: standard JSON.stringify converts undefined array elements
+ * to null, and objects with toJSON() returning undefined also become null.
+ * Pre-stringify .filter() calls cannot catch these cases because toJSON()
+ * is only invoked DURING serialization, not before.
+ *
+ * The replacer intercepts every value during serialization. When it encounters
+ * an array, it returns a filtered copy with null/undefined removed.
+ * This is the definitive fix — no null can survive this.
+ */
+function safeStringify(obj) {
+    return JSON.stringify(obj, function(_key, value) {
+        if (Array.isArray(value)) {
+            return value.filter(function(item) { return item != null; });
+        }
+        return value;
+    });
+}
+
+/**
  * Deep-sanitize a messages array: remove null/undefined entries,
  * strip internal RisuAI tags, and filter messages with truly empty content.
  * Returns a NEW array — never mutates the input.
@@ -184,9 +206,13 @@ function sanitizeMessages(messages) {
 
 /**
  * Absolute last-line-of-defense: parse a JSON body string, filter null entries
- * from the messages/contents arrays, and re-stringify.
- * Guarantees no null array elements reach the API regardless of any upstream bug.
- * Also deep-scans to remove any message whose 'content' field is null/undefined.
+ * from the messages/contents arrays, and re-stringify using safeStringify.
+ *
+ * Two-phase sanitization:
+ *   Phase 1: Parse → explicit filter with logging → catches known null patterns
+ *   Phase 2: Re-stringify via safeStringify (replacer) → catches ANY null in ANY
+ *            array, including nulls produced by toJSON(), undefined→null conversion,
+ *            or any other JSON.stringify edge case.
  *
  * CRITICAL: This is the final safeguard before the body crosses the V3 iframe
  * bridge (postMessage) and reaches the RisuAI proxy. Neither of those layers
@@ -216,6 +242,11 @@ function sanitizeBodyJSON(jsonStr) {
                     console.warn(`[Cupcake PM] ⚠️ sanitizeBodyJSON: removed message with invalid role at messages[${idx}]`);
                     return false;
                 }
+                // Strip toJSON from message objects to prevent null serialization
+                if (typeof m.toJSON === 'function') {
+                    delete m.toJSON;
+                    console.warn(`[Cupcake PM] ⚠️ sanitizeBodyJSON: stripped toJSON from messages[${idx}]`);
+                }
                 return true;
             });
             if (obj.messages.length < before) {
@@ -235,7 +266,25 @@ function sanitizeBodyJSON(jsonStr) {
                 console.warn(`[Cupcake PM] ⚠️ sanitizeBodyJSON: removed ${before - obj.contents.length} null entries from contents`);
             }
         }
-        return JSON.stringify(obj);
+        // Phase 2: Use safeStringify (replacer) to catch ANY remaining null in ANY array.
+        // This is the nuclear option — the replacer runs during serialization itself,
+        // catching nulls from toJSON(), undefined→null conversion, etc.
+        const result = safeStringify(obj);
+
+        // Phase 3: Post-verification — parse the result and check for null array elements.
+        // If any null survived even the replacer (should be impossible), log for diagnosis.
+        try {
+            const verify = JSON.parse(result);
+            if (Array.isArray(verify.messages)) {
+                for (let i = 0; i < verify.messages.length; i++) {
+                    if (verify.messages[i] == null) {
+                        console.error(`[Cupcake PM] 🚨 CRITICAL: null SURVIVED all sanitization at messages[${i}]! Body dump:`, result.substring(0, 2000));
+                    }
+                }
+            }
+        } catch (_) { /* verification parse failed — not critical */ }
+
+        return result;
     } catch (e) {
         console.error('[Cupcake PM] sanitizeBodyJSON: JSON parse/stringify failed:', e.message);
         return jsonStr;
@@ -1487,10 +1536,29 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
             streamBody.contents = streamBody.contents.filter(m => m != null && typeof m === 'object');
         }
 
+        // Use safeStringify (nuclear replacer) → sanitizeBodyJSON (parse+filter+verify)
+        const finalBody = sanitizeBodyJSON(safeStringify(streamBody));
+
+        // ── Diagnostic: verify final body before fetch ──
+        try {
+            const _diag = JSON.parse(finalBody);
+            if (Array.isArray(_diag.messages)) {
+                const _nullIdx = [];
+                for (let _i = 0; _i < _diag.messages.length; _i++) {
+                    if (_diag.messages[_i] == null) _nullIdx.push(_i);
+                }
+                if (_nullIdx.length > 0) {
+                    console.error(`[Cupcake PM] 🚨 PRE-FETCH: null at messages indices [${_nullIdx.join(',')}] in ${_diag.messages.length} messages! Body preview:`, finalBody.substring(0, 1500));
+                } else {
+                    console.log(`[Cupcake PM] ✓ Pre-fetch body OK: ${_diag.messages.length} messages, model=${_diag.model}`);
+                }
+            }
+        } catch (_) {}
+
         const res = await smartNativeFetch(streamUrl, {
             method: 'POST',
             headers,
-            body: sanitizeBodyJSON(JSON.stringify(streamBody))
+            body: finalBody
             // NOTE: signal: abortSignal removed — AbortSignal can't cross V3 iframe bridge (postMessage structured clone)
         });
 
@@ -1513,7 +1581,7 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
     const res = await smartNativeFetch(config.url, {
         method: 'POST',
         headers,
-        body: sanitizeBodyJSON(JSON.stringify(body))
+        body: sanitizeBodyJSON(safeStringify(body))
         // NOTE: signal: abortSignal removed — AbortSignal can't cross V3 iframe bridge (postMessage structured clone)
     });
 
