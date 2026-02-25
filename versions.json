@@ -12,7 +12,7 @@
         "file": "cpm-provider-anthropic.js"
     },
     "CPM Provider - OpenAI": {
-        "version": "1.2.2",
+        "version": "1.2.3",
         "file": "cpm-provider-openai.js"
     },
     "CPM Provider - DeepSeek": {

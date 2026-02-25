@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.9.4
+//@version 1.9.5
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.9.4';
+const CPM_VERSION = '1.9.5';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -1012,7 +1012,10 @@ async function ensureCopilotApiToken() {
             headers: {
                 'Accept': 'application/json',
                 'Authorization': `Bearer ${cleanToken}`,
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Code/1.109.2 Chrome/142.0.7444.265 Electron/39.3.0 Safari/537.36',
+                'User-Agent': 'GitHubCopilotChat/0.24.1',
+                'Editor-Version': 'vscode/1.96.4',
+                'Editor-Plugin-Version': 'copilot-chat/0.24.1',
+                'X-GitHub-Api-Version': '2024-12-15',
             }
         });
         if (!res.ok) {
@@ -1040,7 +1043,9 @@ async function ensureCopilotApiToken() {
 // 3.8 PROVIDER FETCHERS (Custom only - built-in providers are sub-plugins)
 // ==========================================
 
-async function fetchCustom(config, messages, temp, maxTokens, args = {}, abortSignal) {
+async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abortSignal) {
+    // Defensive: filter null/undefined entries that may leak from RisuAI pipeline
+    const messages = messagesRaw.filter(m => m != null && typeof m === 'object');
     const format = config.format || 'openai';
     let formattedMessages;
     let systemPrompt = '';
@@ -1131,7 +1136,8 @@ async function fetchCustom(config, messages, temp, maxTokens, args = {}, abortSi
     }
 
     const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.key}` };
-    // Copilot auto-detection: if URL is githubcopilot.com, auto-fetch API token + attach VS Code headers
+    // Copilot auto-detection: if URL is githubcopilot.com, auto-fetch API token + attach Copilot headers
+    // Per LBI reference: chat completions only needs Copilot-Integration-Id + X-Request-Id
     if (config.url && config.url.includes('githubcopilot.com')) {
         // Auto-fetch Copilot API token (exchanges stored GitHub OAuth token for short-lived API token)
         let copilotApiToken = config.copilotToken || '';
@@ -1144,9 +1150,7 @@ async function fetchCustom(config, messages, temp, maxTokens, args = {}, abortSi
             console.warn('[Cupcake PM] Copilot: No API token available. Request may fail auth. Set token via Copilot Manager (🔑 탭).');
         }
         headers['Copilot-Integration-Id'] = 'vscode-chat';
-        headers['Editor-Version'] = 'vscode/1.85.1';
-        headers['Editor-Plugin-Version'] = 'copilot-chat/0.11.1';
-        headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Code/1.109.2 Chrome/142.0.7444.265 Electron/39.3.0 Safari/537.36';
+        headers['X-Request-Id'] = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString();
     }
 
     // --- Streaming support ---
@@ -1222,7 +1226,9 @@ async function fetchCustom(config, messages, temp, maxTokens, args = {}, abortSi
 async function fetchByProviderId(modelDef, args, abortSignal) {
     const temp = args.temperature || 0.7;
     const maxTokens = args.max_tokens || 4096;
-    const messages = args.prompt_chat || [];
+    // Filter null/undefined entries from messages — RisuAI's runTrigger (JSON round-trip)
+    // and replacerbeforeRequest hooks can introduce null entries in prompt_chat.
+    const messages = (args.prompt_chat || []).filter(m => m != null && typeof m === 'object');
 
     try {
         // Dynamic provider lookup from registered sub-plugins

@@ -1,5 +1,5 @@
 // @name CPM Provider - OpenAI
-// @version 1.2.2
+// @version 1.2.3
 // @description OpenAI provider for Cupcake PM (Streaming)
 // @icon 🟢
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-openai.js
@@ -92,6 +92,7 @@
 
             const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.key}` };
             // Copilot auto-detection: use ensureCopilotApiToken from provider-manager
+            // Per LBI reference: chat completions only needs Copilot-Integration-Id + X-Request-Id
             if (url.includes('githubcopilot.com')) {
                 let copilotApiToken = '';
                 if (typeof window.CupcakePM?.ensureCopilotApiToken === 'function') {
@@ -103,9 +104,7 @@
                     headers['Authorization'] = `Bearer ${copilotApiToken}`;
                 }
                 headers['Copilot-Integration-Id'] = 'vscode-chat';
-                headers['Editor-Version'] = 'vscode/1.85.1';
-                headers['Editor-Plugin-Version'] = 'copilot-chat/0.11.1';
-                headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Code/1.109.2 Chrome/142.0.7444.265 Electron/39.3.0 Safari/537.36';
+                headers['X-Request-Id'] = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString();
             }
 
             const res = await Risuai.nativeFetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
