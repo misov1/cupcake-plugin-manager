@@ -1,7 +1,7 @@
 //@name CPM Component - Translation Cache Manager
 //@display-name Cupcake Translation Cache
 //@api 3.0
-//@version 1.1.1
+//@version 1.2.0
 //@author Cupcake
 //@description 번역 캐시를 검색·조회·수정하고, 사용자 번역 사전으로 표시 번역을 교정하는 관리 도구입니다.
 //@icon 💾
@@ -54,6 +54,7 @@
     const CORRECTIONS_KEY = 'cpm_transcache_corrections';
     const ENABLED_ARG_KEY = 'cpm_transcache_display_enabled';
     const PAGE_SIZE = 50;
+    const TIMESTAMPS_KEY = 'cpm_transcache_timestamps';
 
     // ==========================================
     // API Feature Detection
@@ -160,6 +161,8 @@
             const results = await risuai.searchTranslationCache("");
             _allCacheEntries = results || [];
             _cacheLoadedAt = Date.now();
+            // 타임스탬프 인덱스 업데이트 (신규/변경 감지)
+            await updateTimestamps(_allCacheEntries);
             return _allCacheEntries;
         } catch (e) {
             console.error(LOG_TAG, 'loadAllCache error:', e);
@@ -178,6 +181,96 @@
             entry.key.toLowerCase().includes(lq) ||
             entry.value.toLowerCase().includes(lq)
         );
+    }
+
+    // ==========================================
+    // Timestamp Tracking (번역 시점 추적)
+    // ==========================================
+    // IndexedDB는 키 사전순으로만 정렬하므로,
+    // 신규/변경을 감지하여 타임스탬프를 별도 저장합니다.
+    // Format: { "원문키": { ts: timestamp, sig: "길이:앞16자" }, ... }
+    let _timestampIndex = {};
+
+    function valueSig(value) {
+        return value.length + ':' + value.substring(0, 16);
+    }
+
+    function relativeTime(ts) {
+        if (!ts) return '';
+        const diff = Date.now() - ts;
+        if (diff < 0) return '';
+        if (diff < 60000) return '방금 전';
+        if (diff < 3600000) return `${Math.floor(diff / 60000)}분 전`;
+        if (diff < 86400000) return `${Math.floor(diff / 3600000)}시간 전`;
+        return `${Math.floor(diff / 86400000)}일 전`;
+    }
+
+    async function loadTimestamps() {
+        try {
+            const raw = await risuai.pluginStorage.getItem(TIMESTAMPS_KEY);
+            _timestampIndex = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : {};
+        } catch (e) {
+            console.error(LOG_TAG, 'loadTimestamps error:', e);
+            _timestampIndex = {};
+        }
+    }
+
+    async function saveTimestamps() {
+        try {
+            await risuai.pluginStorage.setItem(TIMESTAMPS_KEY, JSON.stringify(_timestampIndex));
+        } catch (e) {
+            console.error(LOG_TAG, 'saveTimestamps error:', e);
+        }
+    }
+
+    /**
+     * 캐시 엔트리 배열에 _timestamp 속성을 부여합니다.
+     * - 처음 보는 키: 기존 인덱스가 비어있으면 0 (최초 실행), 아니면 Date.now()
+     * - 값이 변경된 키 (재번역): Date.now()
+     * - 변경 없는 키: 기존 타임스탬프 유지
+     */
+    async function updateTimestamps(entries) {
+        await loadTimestamps();
+        const now = Date.now();
+        const isFirstRun = Object.keys(_timestampIndex).length === 0;
+        const newIndex = {};
+        let changed = false;
+
+        for (const entry of entries) {
+            const sig = valueSig(entry.value);
+            const existing = _timestampIndex[entry.key];
+
+            if (!existing) {
+                newIndex[entry.key] = { ts: isFirstRun ? 0 : now, sig };
+                changed = true;
+            } else if (existing.sig !== sig) {
+                newIndex[entry.key] = { ts: now, sig };
+                changed = true;
+            } else {
+                newIndex[entry.key] = existing;
+            }
+            entry._timestamp = newIndex[entry.key].ts;
+        }
+
+        if (Object.keys(_timestampIndex).length !== Object.keys(newIndex).length) {
+            changed = true;
+        }
+
+        _timestampIndex = newIndex;
+        if (changed) await saveTimestamps();
+    }
+
+    /**
+     * 결과를 현재 정렬 모드에 따라 정렬하고 렌더링합니다.
+     */
+    function applySortAndRender(results) {
+        _unsortedResults = [...results];
+        if (_currentSort === 'recent') {
+            const sorted = [...results].sort((a, b) => (b._timestamp || 0) - (a._timestamp || 0));
+            renderResults(sorted);
+        } else {
+            renderResults(results);
+        }
     }
 
     // ==========================================
@@ -201,8 +294,10 @@
 
     // State
     let _searchResults = [];
+    let _unsortedResults = [];
     let _currentPage = 0;
     let _isLoading = false;
+    let _currentSort = 'default'; // 'default' | 'recent'
 
     function setResult(html) {
         const el = document.getElementById(`${PREFIX}-result`);
@@ -236,6 +331,8 @@
             return;
         }
 
+        const hasTimestamps = results.length > 0 && results[0]._timestamp !== undefined;
+
         let html = `
             <div class="flex items-center justify-between mb-3">
                 <span class="text-sm text-gray-400">총 <strong class="text-blue-300">${total}</strong>건 (${start + 1}~${end})</span>
@@ -245,8 +342,21 @@
                     ${end < total ? `<button onclick="window._cpmTransCache.goPage(${page + 1})" class="px-3 py-1 bg-gray-700 hover:bg-gray-600 text-white rounded text-xs">다음 ▶</button>` : ''}
                 </div>
             </div>
-            <div class="space-y-2">
         `;
+
+        if (hasTimestamps) {
+            const defCls = _currentSort === 'default' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600';
+            const recCls = _currentSort === 'recent' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600';
+            html += `
+                <div class="flex items-center gap-2 mb-3">
+                    <span class="text-xs text-gray-500">정렬:</span>
+                    <button onclick="window._cpmTransCache.sortBy('default')" class="px-3 py-1 ${defCls} rounded text-xs font-medium">기본 (사전순)</button>
+                    <button onclick="window._cpmTransCache.sortBy('recent')" class="px-3 py-1 ${recCls} rounded text-xs font-medium">🕐 최신 번역순</button>
+                </div>
+            `;
+        }
+
+        html += `<div class="space-y-2">`;
 
         for (let i = start; i < end; i++) {
             const item = results[i];
@@ -258,12 +368,14 @@
             const badge = correction
                 ? '<span class="ml-2 px-2 py-0.5 bg-yellow-600/30 text-yellow-300 rounded text-xs">수정됨</span>'
                 : '';
+            const timeStr = relativeTime(item._timestamp);
+            const timeBadge = timeStr ? `<span class="ml-auto text-xs text-gray-600 shrink-0">${timeStr}</span>` : '';
 
             html += `
                 <div class="bg-gray-800 border ${correction ? 'border-yellow-600/50' : 'border-gray-700'} rounded-lg p-3 hover:border-blue-500 transition-colors">
                     <div class="flex items-start justify-between gap-2">
                         <div class="flex-1 min-w-0">
-                            <div class="text-xs text-gray-500 mb-1">원문${badge}</div>
+                            <div class="flex items-center text-xs text-gray-500 mb-1"><span>원문${badge}</span>${timeBadge}</div>
                             <div class="text-sm text-gray-200 break-words font-mono leading-relaxed">${keyPreview}</div>
                             <div class="text-xs text-gray-500 mt-2 mb-1">번역</div>
                             <div class="text-sm ${correction ? 'text-yellow-300' : 'text-green-300'} break-words font-mono leading-relaxed">${valPreview}</div>
@@ -298,6 +410,17 @@
     // ==========================================
     api.goPage = (page) => renderResults(_searchResults, page);
 
+    /** Sort results by mode */
+    api.sortBy = (mode) => {
+        _currentSort = mode;
+        if (mode === 'recent') {
+            _searchResults = [..._unsortedResults].sort((a, b) => (b._timestamp || 0) - (a._timestamp || 0));
+        } else {
+            _searchResults = [..._unsortedResults];
+        }
+        renderResults(_searchResults, 0);
+    };
+
     /** Search RisuAI cache + corrections by keyword */
     api.search = async () => {
         const input = document.getElementById(`${PREFIX}-search-input`);
@@ -313,7 +436,7 @@
                 if (results === null) {
                     showStatus('번역 캐시 API 호출에 실패했습니다.', 'error');
                 } else {
-                    renderResults(results);
+                    applySortAndRender(results);
                 }
             } else {
                 // Fallback: search corrections only
@@ -353,7 +476,7 @@
                 } else if (results.length === 0) {
                     showStatus('번역 캐시가 비어 있습니다.', 'warn');
                 } else {
-                    renderResults(results);
+                    applySortAndRender(results);
                 }
             } else {
                 showStatus('searchTranslationCache API를 사용할 수 없습니다.<br>RisuAI 버전을 확인해주세요. (수정 사전 보기는 아래 버튼 사용)', 'warn');
@@ -849,5 +972,5 @@
         }
     });
 
-    console.log(`${LOG_TAG} Translation Cache Manager v1.1.1 registered — sidebar: 💾 번역 캐시`);
+    console.log(`${LOG_TAG} Translation Cache Manager v1.2.0 registered — sidebar: 💾 번역 캐시`);
 })();
