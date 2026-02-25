@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.10.1
+//@version 1.10.2
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.10.1';
+const CPM_VERSION = '1.10.2';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -243,22 +243,21 @@ function sanitizeBodyJSON(jsonStr) {
 }
 
 /**
- * Smart native fetch: tries direct browser fetch() first (bypasses RisuAI proxy),
- * falls back to Risuai.nativeFetch if direct fetch fails (CORS, network, etc.).
+ * Smart native fetch: 3-strategy fallback for V3 iframe sandbox.
  *
- * Why: RisuAI web proxy (sv.risuai.xyz/proxy2) routes traffic through a server
- * that may be in a region blocked by certain providers (e.g. OpenAI returns
- * 403 "unsupported_country_region_territory"). Direct fetch uses the user's
- * own IP, bypassing this issue for CORS-enabled APIs (OpenAI, DeepSeek, etc.).
+ * Strategy 1: Direct fetch() from iframe — works if CSP allows (non-iframe or relaxed CSP).
+ * Strategy 2: Risuai.risuFetch(plainFetchForce) — direct fetch() from HOST window.
+ *             Bypasses both iframe CSP and RisuAI cloud proxy. Works for CORS-enabled
+ *             APIs (GitHub Copilot, OpenAI, Anthropic, etc.). Returns full response
+ *             (non-streaming), wrapped in a Response object.
+ * Strategy 3: Risuai.nativeFetch — goes through RisuAI cloud proxy (sv.risuai.xyz/proxy2).
+ *             Supports streaming but may fail for certain POST bodies.
  *
- * Returns a native Response object, compatible with streaming.
+ * Returns a native Response object, compatible with streaming (from Strategy 1 or 3)
+ * or a wrapped non-streaming Response (from Strategy 2).
  */
 async function smartNativeFetch(url, options = {}) {
     // ── Final body sanitization before any network call ──
-    // The body string was already sanitized by sanitizeBodyJSON at the callsite,
-    // but we run it ONE MORE TIME here as an absolute last defense.
-    // This catches any theoretical corruption between the callsite and here
-    // (e.g., prototype pollution, toJSON override, async race conditions).
     if (options.method === 'POST' && typeof options.body === 'string') {
         try {
             options = { ...options, body: sanitizeBodyJSON(options.body) };
@@ -267,17 +266,53 @@ async function smartNativeFetch(url, options = {}) {
         }
     }
 
-    // Strategy 1: Direct browser fetch (bypasses proxy)
+    // Strategy 1: Direct browser fetch from iframe (bypasses proxy if CSP allows)
     try {
         const res = await fetch(url, options);
-        // If we get a real HTTP response (even 4xx/5xx), return it
-        // Direct fetch succeeded — proxy bypass worked
         return res;
     } catch (e) {
-        // Direct fetch failed (CORS, network, sandbox restriction, etc.)
-        console.log(`[CupcakePM] Direct fetch failed for ${url.substring(0, 60)}...: ${e.message}. Falling back to nativeFetch (proxy).`);
+        // Expected in V3 iframe sandbox (connect-src 'none')
+        console.log(`[CupcakePM] Direct fetch failed for ${url.substring(0, 60)}...: ${e.message}`);
     }
-    // Strategy 2: Fall back to Risuai.nativeFetch (goes through proxy)
+
+    // Strategy 2: risuFetch with plainFetchForce — direct fetch from HOST window
+    // This bypasses both the iframe CSP sandbox AND the cloud proxy.
+    // Works for CORS-enabled APIs (GitHub, OpenAI, Anthropic, Google, etc.)
+    // Trade-off: returns full response at once (non-streaming), but avoids proxy issues.
+    if (typeof Risuai.risuFetch === 'function') {
+        try {
+            // risuFetch expects body as an object, not a string
+            let bodyObj = undefined;
+            if (options.body && typeof options.body === 'string') {
+                try { bodyObj = JSON.parse(options.body); } catch { bodyObj = options.body; }
+            } else if (options.body) {
+                bodyObj = options.body;
+            }
+            const result = await Risuai.risuFetch(url, {
+                method: options.method || 'POST',
+                headers: options.headers || {},
+                body: bodyObj,
+                rawResponse: true,
+                plainFetchForce: true,
+            });
+            // Distinguish real HTTP response (Uint8Array data) from network error (string data)
+            if (result && result.data instanceof Uint8Array) {
+                console.log(`[CupcakePM] risuFetch (direct from host) succeeded: status=${result.status} for ${url.substring(0, 60)}`);
+                return new Response(result.data, {
+                    status: result.status || 200,
+                    headers: new Headers(result.headers || {})
+                });
+            }
+            // Not a real HTTP response — likely CORS/network failure
+            const errPreview = typeof result?.data === 'string' ? result.data.substring(0, 120) : 'unknown';
+            console.log(`[CupcakePM] risuFetch (plainFetchForce) not a real response: ${errPreview}. Falling back to nativeFetch (proxy).`);
+        } catch (e) {
+            console.log(`[CupcakePM] risuFetch fallback error: ${e.message}. Falling back to nativeFetch (proxy).`);
+        }
+    }
+
+    // Strategy 3: Risuai.nativeFetch (goes through RisuAI cloud proxy — supports streaming)
+    console.log(`[CupcakePM] Using nativeFetch (proxy) for ${url.substring(0, 60)}...`);
     return await Risuai.nativeFetch(url, options);
 }
 
@@ -1349,7 +1384,6 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
 
     const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.key}` };
     // Copilot auto-detection: if URL is githubcopilot.com, auto-fetch API token + attach Copilot headers
-    // Per LBI reference: chat completions only needs Copilot-Integration-Id + X-Request-Id
     if (config.url && config.url.includes('githubcopilot.com')) {
         // Auto-fetch Copilot API token (exchanges stored GitHub OAuth token for short-lived API token)
         let copilotApiToken = config.copilotToken || '';
@@ -1361,9 +1395,12 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
         } else {
             console.warn('[Cupcake PM] Copilot: No API token available. Request may fail auth. Set token via Copilot Manager (🔑 탭).');
         }
+        // Required Copilot headers (from cpm-copilot-manager & VS Code Copilot extension)
         headers['Copilot-Integration-Id'] = 'vscode-chat';
         headers['X-Request-Id'] = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString();
-        // Copilot-Vision-Request header (LBI pre31 pattern): detect vision content in messages
+        headers['Editor-Version'] = 'vscode/1.109.2';
+        headers['Editor-Plugin-Version'] = 'copilot-chat/0.37.4';
+        // Copilot-Vision-Request header: detect vision content in messages
         if (body.messages && body.messages.some(m => Array.isArray(m?.content) && m.content.some(p => p.type === 'image_url'))) {
             headers['Copilot-Vision-Request'] = 'true';
         }
@@ -1403,7 +1440,11 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
             // NOTE: signal: abortSignal removed — AbortSignal can't cross V3 iframe bridge (postMessage structured clone)
         });
 
-        if (!res.ok) return { success: false, content: `[Custom API Error ${res.status}] ${await res.text()}` };
+        if (!res.ok) {
+            const errBody = await res.text();
+            console.error(`[Cupcake PM] Streaming request failed (${res.status}) for ${streamUrl.substring(0, 60)}:`, errBody.substring(0, 500));
+            return { success: false, content: `[Custom API Error ${res.status}] ${errBody}` };
+        }
 
         if (format === 'anthropic') {
             return { success: true, content: createAnthropicSSEStream(res, abortSignal) };
@@ -1422,7 +1463,11 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
         // NOTE: signal: abortSignal removed — AbortSignal can't cross V3 iframe bridge (postMessage structured clone)
     });
 
-    if (!res.ok) return { success: false, content: `[Custom API Error ${res.status}] ${await res.text()}` };
+    if (!res.ok) {
+        const errBody = await res.text();
+        console.error(`[Cupcake PM] Non-streaming request failed (${res.status}) for ${config.url.substring(0, 60)}:`, errBody.substring(0, 500));
+        return { success: false, content: `[Custom API Error ${res.status}] ${errBody}` };
+    }
     const data = await res.json();
 
     if (format === 'anthropic') {
