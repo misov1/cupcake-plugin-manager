@@ -342,13 +342,14 @@ const SubPluginManager = {
         const url = plugin.updateUrl;
         if (!url) return null;
         try {
-            // Use Risuai.nativeFetch — direct fetch() is blocked by iframe CSP (about:srcdoc)
+            // Use Risuai.risuFetch — direct fetch() is blocked by iframe CSP,
+            // and nativeFetch goes through proxy2 which caches incorrectly
             const cacheBuster = url + (url.includes('?') ? '&' : '?') + '_t=' + Date.now();
-            const res = await Risuai.nativeFetch(cacheBuster, {
+            const res = await Risuai.risuFetch(cacheBuster, {
                 method: 'GET'
             });
             if (!res.ok) return null;
-            const remoteCode = await res.text();
+            const remoteCode = typeof res.data === 'string' ? res.data : JSON.stringify(res.data);
             const remoteMeta = this.extractMetadata(remoteCode);
             if (!remoteMeta.version) return null;
             // Validate that the remote file matches this plugin (name check)
