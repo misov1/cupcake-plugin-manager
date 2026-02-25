@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.9.2
+//@version 1.9.3
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.9.2';
+const CPM_VERSION = '1.9.3';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -338,17 +338,20 @@ const SubPluginManager = {
     },
 
     // ── Single-Bundle Update System ──
-    // RisuAI's proxy2 (sv.risuai.xyz/proxy2) caches ALL nativeFetch responses PER-DOMAIN.
-    // The @update-url check, other plugins, etc. can poison raw.githubusercontent.com and
-    // cupcake-plugin-manager.vercel.app in proxy2's cache.
+    // Constraints of RisuAI's web environment:
+    //   1. iframe CSP blocks all cross-origin fetch() → can't use direct fetch
+    //   2. nativeFetch goes through proxy2 which caches PER-DOMAIN → cache poisoning
+    //   3. risuFetch(plainFetchForce) runs in HOST window, bypasses proxy2,
+    //      BUT always adds Content-Type: application/json header → triggers CORS preflight
+    //   4. raw.githubusercontent.com doesn't support OPTIONS preflight → CORS fails
     //
-    // Solution: Use risuFetch with plainFetchForce: true
-    //   - Executes fetch() in the HOST WINDOW (bypasses iframe CSP)
-    //   - Bypasses proxy2 entirely (direct browser fetch, no cloud proxy)
-    //   - GitHub raw supports CORS (Access-Control-Allow-Origin: *) so direct fetch works
-    //   - Returns { ok, data, headers, status } with auto-parsed JSON
+    // Solution: Vercel API route (/api/update-bundle) that:
+    //   - Properly handles OPTIONS preflight (returns 204 with CORS headers)
+    //   - Serves combined {versions, code} bundle as JSON
+    //   - risuFetch(plainFetchForce) bypasses proxy2 → no cache poisoning
+    //   - Vercel fully supports CORS preflight → no CORS errors
 
-    UPDATE_BUNDLE_URL: 'https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/update-bundle.json',
+    UPDATE_BUNDLE_URL: 'https://cupcake-plugin-manager.vercel.app/api/update-bundle',
 
     // Check all plugins for updates. Fetches ONE combined bundle (versions + code).
     // Returns array of { plugin, remoteVersion, localVersion, code }.
@@ -360,7 +363,7 @@ const SubPluginManager = {
             // risuFetch with plainFetchForce: true
             //   - Runs fetch() in the HOST window (not the sandboxed iframe) → bypasses CSP
             //   - plainFetchForce bypasses proxy2 entirely → no cache poisoning
-            //   - GitHub raw supports CORS → direct browser fetch works
+            //   - Vercel API route handles OPTIONS preflight → no CORS errors
             //   - Returns { ok, data, headers, status } with data auto-parsed as JSON
             const result = await Risuai.risuFetch(cacheBuster, {
                 method: 'GET',
