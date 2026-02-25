@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.9.0
+//@version 1.9.1
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.9.0';
+const CPM_VERSION = '1.9.1';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -337,33 +337,38 @@ const SubPluginManager = {
         return 0;
     },
 
-    // ── Manifest-based Update System ──
-    // RisuAI's proxy2 caches ALL requests to the same domain with the first response.
-    // This means we can only make ONE nativeFetch per domain per session.
+    // ── Single-Bundle Update System ──
+    // RisuAI's proxy2 caches ALL nativeFetch responses PER-DOMAIN with the first response.
+    // Problem: @update-url fetches provider-manager.js from Vercel → poisons entire Vercel domain.
+    //          Any subsequent nativeFetch to Vercel (e.g. versions.json) returns cached JS code.
     //
-    // Strategy: 2-phase approach using 2 different domains
-    //   Phase 1: Fetch versions.json from VERCEL to check which plugins need updating
-    //   Phase 2: Fetch code-bundle.json from GITHUB RAW (ONE request) containing ALL plugin code
-    //
-    // This way applyUpdate never needs to fetch — it uses the pre-fetched code.
+    // Solution: ONE request to GitHub raw for a combined update-bundle.json containing
+    //   { versions: { name → {version, file} }, code: { file → code } }
+    // This avoids Vercel entirely and needs only ONE nativeFetch to GitHub raw.
 
-    MANIFEST_URL: 'https://cupcake-plugin-manager.vercel.app/versions.json',
-    CODE_BUNDLE_URL: 'https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/code-bundle.json',
+    UPDATE_BUNDLE_URL: 'https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/update-bundle.json',
 
-    // Check all plugins for updates. If updates found, pre-fetches ALL code in one request.
+    // Check all plugins for updates. Fetches ONE combined bundle (versions + code).
     // Returns array of { plugin, remoteVersion, localVersion, code }.
     async checkAllUpdates() {
         try {
-            // Phase 1: Fetch version manifest from Vercel (ONE request to Vercel domain)
-            const cacheBuster = this.MANIFEST_URL + '?_t=' + Date.now() + '_r=' + Math.random().toString(36).substr(2, 8);
-            console.log(`[CPM Update] Fetching version manifest: ${cacheBuster}`);
-            const res = await Risuai.nativeFetch(cacheBuster, { method: 'GET' });
+            const cacheBuster = this.UPDATE_BUNDLE_URL + '?_t=' + Date.now() + '_r=' + Math.random().toString(36).substr(2, 8);
+            console.log(`[CPM Update] Fetching update bundle: ${cacheBuster}`);
+            let res;
+            try {
+                res = await fetch(cacheBuster, { method: 'GET', cache: 'no-store' });
+            } catch (fetchErr) {
+                console.log(`[CPM Update] Direct fetch blocked (CSP), falling back to nativeFetch`);
+                res = await Risuai.nativeFetch(cacheBuster, { method: 'GET' });
+            }
             if (!res.ok) {
-                console.error(`[CPM Update] Failed to fetch manifest: ${res.status}`);
+                console.error(`[CPM Update] Failed to fetch update bundle: ${res.status}`);
                 return [];
             }
-            const manifest = await res.json();
-            console.log(`[CPM Update] Manifest loaded:`, manifest);
+            const bundle = await res.json();
+            const manifest = bundle.versions || {};
+            const codeBundle = bundle.code || {};
+            console.log(`[CPM Update] Bundle loaded: ${Object.keys(manifest).length} versions, ${Object.keys(codeBundle).length} code files`);
 
             const results = [];
             for (const p of this.plugins) {
@@ -376,47 +381,21 @@ const SubPluginManager = {
                 const cmp = this.compareVersions(p.version || '0.0.0', remote.version);
                 console.log(`[CPM Update] ${p.name}: local=${p.version} remote=${remote.version} cmp=${cmp}`);
                 if (cmp > 0) {
+                    const code = (remote.file && codeBundle[remote.file]) ? codeBundle[remote.file] : null;
+                    if (code) {
+                        console.log(`[CPM Update] Code ready for ${p.name} (${(code.length / 1024).toFixed(1)}KB)`);
+                    } else {
+                        console.warn(`[CPM Update] ${p.name} (${remote.file}) code not found in bundle`);
+                    }
                     results.push({
                         plugin: p,
                         remoteVersion: remote.version,
                         localVersion: p.version || '0.0.0',
                         remoteFile: remote.file,
-                        code: null, // will be filled from bundle
+                        code,
                     });
                 }
             }
-
-            // Phase 2: If any updates found, pre-fetch code bundle from GitHub raw (ONE request)
-            if (results.length > 0) {
-                try {
-                    const bundleBuster = this.CODE_BUNDLE_URL + '?_t=' + Date.now() + '_r=' + Math.random().toString(36).substr(2, 8);
-                    console.log(`[CPM Update] Fetching code bundle: ${bundleBuster}`);
-                    let bundleRes;
-                    try {
-                        bundleRes = await fetch(bundleBuster, { method: 'GET', cache: 'no-store' });
-                    } catch (fetchErr) {
-                        console.log(`[CPM Update] Direct fetch for bundle blocked (CSP), falling back to nativeFetch`);
-                        bundleRes = await Risuai.nativeFetch(bundleBuster, { method: 'GET' });
-                    }
-                    if (bundleRes.ok) {
-                        const codeBundle = await bundleRes.json();
-                        console.log(`[CPM Update] Code bundle loaded (${Object.keys(codeBundle).length} files)`);
-                        for (const u of results) {
-                            if (u.remoteFile && codeBundle[u.remoteFile]) {
-                                u.code = codeBundle[u.remoteFile];
-                                console.log(`[CPM Update] Pre-fetched code for ${u.plugin.name} (${(u.code.length / 1024).toFixed(1)}KB)`);
-                            } else {
-                                console.warn(`[CPM Update] ${u.plugin.name} (${u.remoteFile}) not found in code bundle`);
-                            }
-                        }
-                    } else {
-                        console.error(`[CPM Update] Failed to fetch code bundle: ${bundleRes.status}`);
-                    }
-                } catch (bundleErr) {
-                    console.error(`[CPM Update] Code bundle fetch error:`, bundleErr);
-                }
-            }
-
             return results;
         } catch (e) {
             console.error(`[CPM Update] Failed to check updates:`, e);
