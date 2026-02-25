@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.9.8
+//@version 1.10.0
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.9.8';
+const CPM_VERSION = '1.10.0';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -163,15 +163,24 @@ function sanitizeMessages(messages) {
  * Absolute last-line-of-defense: parse a JSON body string, filter null entries
  * from the messages/contents arrays, and re-stringify.
  * Guarantees no null array elements reach the API regardless of any upstream bug.
+ * Also deep-scans to remove any message whose 'content' field is null/undefined.
  */
 function sanitizeBodyJSON(jsonStr) {
     try {
         const obj = JSON.parse(jsonStr);
         if (Array.isArray(obj.messages)) {
             const before = obj.messages.length;
-            obj.messages = obj.messages.filter(m => m != null && typeof m === 'object');
+            obj.messages = obj.messages.filter(m => {
+                if (m == null || typeof m !== 'object') return false;
+                // Remove messages with null/undefined content (API rejects these)
+                if (m.content === null || m.content === undefined) {
+                    console.warn(`[Cupcake PM] ⚠️ Removed message with null content (role=${m.role})`);
+                    return false;
+                }
+                return true;
+            });
             if (obj.messages.length < before) {
-                console.warn(`[Cupcake PM] ⚠️ JSON-level sanitization removed ${before - obj.messages.length} null entries from messages`);
+                console.warn(`[Cupcake PM] ⚠️ JSON-level sanitization removed ${before - obj.messages.length} null/invalid entries from messages (was ${before}, now ${obj.messages.length})`);
             }
         }
         if (Array.isArray(obj.contents)) {
@@ -186,6 +195,32 @@ function sanitizeBodyJSON(jsonStr) {
         // If parse fails, return original string
         return jsonStr;
     }
+}
+
+/**
+ * Smart native fetch: tries direct browser fetch() first (bypasses RisuAI proxy),
+ * falls back to Risuai.nativeFetch if direct fetch fails (CORS, network, etc.).
+ *
+ * Why: RisuAI web proxy (sv.risuai.xyz/proxy2) routes traffic through a server
+ * that may be in a region blocked by certain providers (e.g. OpenAI returns
+ * 403 "unsupported_country_region_territory"). Direct fetch uses the user's
+ * own IP, bypassing this issue for CORS-enabled APIs (OpenAI, DeepSeek, etc.).
+ *
+ * Returns a native Response object, compatible with streaming.
+ */
+async function smartNativeFetch(url, options = {}) {
+    // Strategy 1: Direct browser fetch (bypasses proxy)
+    try {
+        const res = await fetch(url, options);
+        // If we get a real HTTP response (even 4xx/5xx), return it
+        // Direct fetch succeeded — proxy bypass worked
+        return res;
+    } catch (e) {
+        // Direct fetch failed (CORS, network, sandbox restriction, etc.)
+        console.log(`[CupcakePM] Direct fetch failed for ${url.substring(0, 60)}...: ${e.message}. Falling back to nativeFetch (proxy).`);
+    }
+    // Strategy 2: Fall back to Risuai.nativeFetch (goes through proxy)
+    return await Risuai.nativeFetch(url, options);
 }
 
 // ==========================================
@@ -682,16 +717,13 @@ window.CupcakePM = {
      * smartFetch: Try direct browser fetch first (avoids proxy issues),
      * fall back to Risuai.nativeFetch if CORS or network error occurs.
      */
-    smartFetch: async (url, options = {}) => {
-        try {
-            const res = await fetch(url, options);
-            return res;
-        } catch (e) {
-            // Direct fetch failed (likely CORS), fall back to nativeFetch
-            console.log(`[CupcakePM] Direct fetch failed for ${url.substring(0, 60)}..., falling back to nativeFetch`);
-            return await Risuai.nativeFetch(url, options);
-        }
-    },
+    smartFetch: async (url, options = {}) => smartNativeFetch(url, options),
+    /**
+     * smartNativeFetch: Same as smartFetch but explicitly named for streaming use.
+     * Tries direct fetch() → falls back to nativeFetch (proxy).
+     * Returns native Response object, compatible with ReadableStream/SSE.
+     */
+    smartNativeFetch: async (url, options = {}) => smartNativeFetch(url, options),
     /** Exchange stored GitHub OAuth token for short-lived Copilot API token (cached). */
     ensureCopilotApiToken: () => ensureCopilotApiToken(),
 };
@@ -1086,7 +1118,7 @@ async function ensureCopilotApiToken() {
     if (!cleanToken) return '';
     try {
         console.log('[Cupcake PM] Copilot: Exchanging OAuth token for API token...');
-        const res = await Risuai.nativeFetch('https://api.github.com/copilot_internal/v2/token', {
+        const res = await smartNativeFetch('https://api.github.com/copilot_internal/v2/token', {
             method: 'GET',
             headers: {
                 'Accept': 'application/json',
@@ -1294,7 +1326,7 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
             streamBody.contents = streamBody.contents.filter(m => m != null && typeof m === 'object');
         }
 
-        const res = await Risuai.nativeFetch(streamUrl, {
+        const res = await smartNativeFetch(streamUrl, {
             method: 'POST',
             headers,
             body: sanitizeBodyJSON(JSON.stringify(streamBody))
@@ -1313,7 +1345,7 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
     }
 
     // --- Non-streaming (decoupled) fallback ---
-    const res = await Risuai.nativeFetch(config.url, {
+    const res = await smartNativeFetch(config.url, {
         method: 'POST',
         headers,
         body: sanitizeBodyJSON(JSON.stringify(body))

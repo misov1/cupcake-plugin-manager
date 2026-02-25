@@ -1,5 +1,5 @@
 // @name CPM Provider - Gemini Studio
-// @version 1.2.1
+// @version 1.3.0
 // @description Google Gemini Studio (API Key) provider for Cupcake PM (Streaming)
 // @icon 🔵
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-gemini.js
@@ -84,7 +84,8 @@
             if (systemInstruction.length > 0) body.systemInstruction = { parts: systemInstruction.map(text => ({ text })) };
             if (config.thinking && config.thinking !== 'off') body.generationConfig.thinkingConfig = { thinkingBudget: 8192 };
 
-            const res = await Risuai.nativeFetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+            const fetchFn = typeof CPM.smartNativeFetch === 'function' ? CPM.smartNativeFetch : Risuai.nativeFetch;
+            const res = await fetchFn(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
             if (!res.ok) return { success: false, content: `[Gemini Error ${res.status}] ${await res.text()}` };
             return { success: true, content: CPM.createSSEStream(res, (line) => CPM.parseGeminiSSELine(line, config), abortSignal) };
         },

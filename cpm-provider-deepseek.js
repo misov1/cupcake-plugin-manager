@@ -1,5 +1,5 @@
 // @name CPM Provider - DeepSeek
-// @version 1.2.1
+// @version 1.3.0
 // @description DeepSeek provider for Cupcake PM (Streaming)
 // @icon 🟣
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-deepseek.js
@@ -52,7 +52,8 @@
             if (args.frequency_penalty !== undefined && args.frequency_penalty !== null) body.frequency_penalty = args.frequency_penalty;
             if (args.presence_penalty !== undefined && args.presence_penalty !== null) body.presence_penalty = args.presence_penalty;
 
-            const res = await Risuai.nativeFetch(url, {
+            const fetchFn = typeof CPM.smartNativeFetch === 'function' ? CPM.smartNativeFetch : Risuai.nativeFetch;
+            const res = await fetchFn(url, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.key}` },
                 body: JSON.stringify(body)

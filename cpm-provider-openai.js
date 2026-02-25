@@ -1,5 +1,5 @@
 // @name CPM Provider - OpenAI
-// @version 1.3.0
+// @version 1.4.0
 // @description OpenAI provider for Cupcake PM (Streaming)
 // @icon 🟢
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-openai.js
@@ -145,12 +145,15 @@
             try {
                 const parsed = JSON.parse(bodyJSON);
                 if (Array.isArray(parsed.messages)) {
-                    parsed.messages = parsed.messages.filter(m => m != null && typeof m === 'object');
+                    parsed.messages = parsed.messages.filter(m => m != null && typeof m === 'object' && m.content !== null && m.content !== undefined);
                 }
                 safeBody = JSON.stringify(parsed);
             } catch (_) { /* use original */ }
 
-            const res = await Risuai.nativeFetch(url, { method: 'POST', headers, body: safeBody });
+            // Use smartNativeFetch: direct fetch() first (bypasses proxy region-blocking),
+            // falls back to nativeFetch (proxy) if direct fails.
+            const fetchFn = typeof CPM.smartNativeFetch === 'function' ? CPM.smartNativeFetch : Risuai.nativeFetch;
+            const res = await fetchFn(url, { method: 'POST', headers, body: safeBody });
             if (!res.ok) return { success: false, content: `[OpenAI Error ${res.status}] ${await res.text()}` };
             return { success: true, content: CPM.createSSEStream(res, CPM.parseOpenAISSELine, abortSignal) };
         },
