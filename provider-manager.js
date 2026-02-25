@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.10.4
+//@version 1.10.5
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.10.4';
+const CPM_VERSION = '1.10.5';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -246,15 +246,17 @@ function sanitizeBodyJSON(jsonStr) {
  * Smart native fetch: 3-strategy fallback for V3 iframe sandbox.
  *
  * Strategy 1: Direct fetch() from iframe — works if CSP allows (non-iframe or relaxed CSP).
- * Strategy 2: Risuai.risuFetch(plainFetchForce) — direct fetch() from HOST window.
- *             Bypasses both iframe CSP and RisuAI cloud proxy. Works for CORS-enabled
- *             APIs (GitHub Copilot, OpenAI, Anthropic, etc.). Returns full response
- *             (non-streaming), wrapped in a Response object.
- * Strategy 3: Risuai.nativeFetch — goes through RisuAI cloud proxy (sv.risuai.xyz/proxy2).
- *             Supports streaming but may fail for certain POST bodies.
+ * Strategy 2: Risuai.nativeFetch — goes through RisuAI cloud proxy (sv.risuai.xyz/proxy2).
+ *             Supports streaming and preserves the EXACT body string (no re-parse/re-stringify).
+ *             This avoids the "messages[N] is null" bug caused by the V3 postMessage bridge
+ *             re-stringifying parsed body objects through fetchWithPlainFetch.
+ * Strategy 3: Risuai.risuFetch(plainFetchForce) — direct fetch() from HOST window.
+ *             Bypasses both iframe CSP and RisuAI cloud proxy. Used as fallback when
+ *             the proxy fails (e.g., region-restricted APIs like Vertex AI).
+ *             Trade-off: body object crosses postMessage bridge and gets re-stringified.
  *
- * Returns a native Response object, compatible with streaming (from Strategy 1 or 3)
- * or a wrapped non-streaming Response (from Strategy 2).
+ * Returns a native Response object, compatible with streaming (from Strategy 1 or 2)
+ * or a wrapped non-streaming Response (from Strategy 3).
  */
 async function smartNativeFetch(url, options = {}) {
     // ── Final body sanitization before any network call ──
@@ -275,19 +277,71 @@ async function smartNativeFetch(url, options = {}) {
         console.log(`[CupcakePM] Direct fetch failed for ${url.substring(0, 60)}...: ${e.message}`);
     }
 
-    // Strategy 2: risuFetch with plainFetchForce — direct fetch from HOST window
-    // This bypasses both the iframe CSP sandbox AND the cloud proxy.
-    // Works for CORS-enabled APIs (GitHub, OpenAI, Anthropic, Google, etc.)
-    // Trade-off: returns full response at once (non-streaming), but avoids proxy issues.
+    // Strategy 2: Risuai.nativeFetch — proxy route with preserved body string
+    // This is preferred for POST requests because the body is passed as an EXACT string,
+    // avoiding the null-introduction bug from risuFetch's object→JSON.stringify round-trip.
+    // The proxy at sv.risuai.xyz/proxy2 supports streaming and handles most APIs well.
+    try {
+        console.log(`[CupcakePM] Using nativeFetch (proxy) for ${url.substring(0, 60)}...`);
+        const res = await Risuai.nativeFetch(url, options);
+
+        // Check for proxy-level failures that risuFetch (direct) could bypass:
+        // - 403 with region/country errors (Vertex AI, Google Cloud endpoints)
+        // - Proxy itself returning errors unrelated to the target API
+        if (!res.ok && (res.status === 403 || res.status === 502 || res.status === 503)) {
+            let errText = '';
+            try {
+                // Clone response to read error body without consuming it
+                errText = await res.clone().text();
+            } catch {}
+            const isProxyRegionError = errText.includes('Country') || errText.includes('region') ||
+                errText.includes('territory') || errText.includes('not supported') ||
+                errText.includes('blocked') || errText.includes('proxy');
+            if (isProxyRegionError) {
+                console.log(`[CupcakePM] nativeFetch proxy region/block error (${res.status}), trying risuFetch direct...`);
+                // Fall through to Strategy 3 (risuFetch direct)
+            } else {
+                // Real API error (not proxy issue) — return as-is
+                return res;
+            }
+        } else {
+            return res;
+        }
+    } catch (e) {
+        console.log(`[CupcakePM] nativeFetch failed: ${e.message}. Trying risuFetch direct...`);
+    }
+
+    // Strategy 3: risuFetch with plainFetchForce — direct fetch from HOST window
+    // Bypasses both iframe CSP sandbox AND cloud proxy.
+    // Used when proxy fails (region-restricted APIs like Vertex AI, Google Cloud).
+    // IMPORTANT: body object crosses postMessage bridge → host re-stringifies via JSON.stringify.
+    // We must deep-sanitize the parsed body to prevent null entries from surviving the round-trip.
     if (typeof Risuai.risuFetch === 'function') {
         try {
-            // risuFetch expects body as an object, not a string
             let bodyObj = undefined;
             if (options.body && typeof options.body === 'string') {
                 try { bodyObj = JSON.parse(options.body); } catch { bodyObj = options.body; }
             } else if (options.body) {
                 bodyObj = options.body;
             }
+
+            // ── Deep-sanitize body object before it crosses the postMessage bridge ──
+            // The V3 bridge uses structured clone + JSON.stringify on the host side.
+            // Ensure messages/contents arrays have absolutely no null/invalid entries.
+            if (bodyObj && typeof bodyObj === 'object') {
+                if (Array.isArray(bodyObj.messages)) {
+                    bodyObj.messages = bodyObj.messages.filter(m => {
+                        if (m == null || typeof m !== 'object') return false;
+                        if (m.content === null || m.content === undefined) return false;
+                        if (typeof m.role !== 'string' || !m.role) return false;
+                        return true;
+                    });
+                }
+                if (Array.isArray(bodyObj.contents)) {
+                    bodyObj.contents = bodyObj.contents.filter(m => m != null && typeof m === 'object');
+                }
+            }
+
             const result = await Risuai.risuFetch(url, {
                 method: options.method || 'POST',
                 headers: options.headers || {},
@@ -305,14 +359,14 @@ async function smartNativeFetch(url, options = {}) {
             }
             // Not a real HTTP response — likely CORS/network failure
             const errPreview = typeof result?.data === 'string' ? result.data.substring(0, 120) : 'unknown';
-            console.log(`[CupcakePM] risuFetch (plainFetchForce) not a real response: ${errPreview}. Falling back to nativeFetch (proxy).`);
+            console.log(`[CupcakePM] risuFetch (plainFetchForce) not a real response: ${errPreview}`);
         } catch (e) {
-            console.log(`[CupcakePM] risuFetch fallback error: ${e.message}. Falling back to nativeFetch (proxy).`);
+            console.log(`[CupcakePM] risuFetch fallback error: ${e.message}`);
         }
     }
 
-    // Strategy 3: Risuai.nativeFetch (goes through RisuAI cloud proxy — supports streaming)
-    console.log(`[CupcakePM] Using nativeFetch (proxy) for ${url.substring(0, 60)}...`);
+    // Final fallback: try nativeFetch one more time (shouldn't reach here normally)
+    console.log(`[CupcakePM] All strategies failed, last resort nativeFetch for ${url.substring(0, 60)}...`);
     return await Risuai.nativeFetch(url, options);
 }
 
