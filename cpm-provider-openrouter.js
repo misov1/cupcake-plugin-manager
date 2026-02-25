@@ -1,5 +1,5 @@
 // @name CPM Provider - OpenRouter
-// @version 1.1.0
+// @version 1.1.1
 // @description OpenRouter provider for Cupcake PM (Streaming)
 // @icon 🌐
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-openrouter.js

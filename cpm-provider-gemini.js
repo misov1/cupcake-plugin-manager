@@ -1,5 +1,5 @@
 // @name CPM Provider - Gemini Studio
-// @version 1.2.0
+// @version 1.2.1
 // @description Google Gemini Studio (API Key) provider for Cupcake PM (Streaming)
 // @icon 🔵
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-gemini.js
