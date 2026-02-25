@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.8.1
+//@version 1.8.2
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.8.1';
+const CPM_VERSION = '1.8.2';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -1066,8 +1066,8 @@ async function fetchCustom(config, messages, temp, maxTokens, args = {}, abortSi
         const res = await Risuai.nativeFetch(streamUrl, {
             method: 'POST',
             headers,
-            body: JSON.stringify(streamBody),
-            signal: abortSignal
+            body: JSON.stringify(streamBody)
+            // NOTE: signal: abortSignal removed — AbortSignal can't cross V3 iframe bridge (postMessage structured clone)
         });
 
         if (!res.ok) return { success: false, content: `[Custom API Error ${res.status}] ${await res.text()}` };
@@ -1085,8 +1085,8 @@ async function fetchCustom(config, messages, temp, maxTokens, args = {}, abortSi
     const res = await Risuai.nativeFetch(config.url, {
         method: 'POST',
         headers,
-        body: JSON.stringify(body),
-        signal: abortSignal
+        body: JSON.stringify(body)
+        // NOTE: signal: abortSignal removed — AbortSignal can't cross V3 iframe bridge (postMessage structured clone)
     });
 
     if (!res.ok) return { success: false, content: `[Custom API Error ${res.status}] ${await res.text()}` };
