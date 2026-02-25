@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.9.6
+//@version 1.9.7
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.9.6';
+const CPM_VERSION = '1.9.7';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -125,6 +125,66 @@ async function isDynamicFetchEnabled(providerName) {
         return (val === 'true' || val === true);
     } catch {
         return false;
+    }
+}
+
+/**
+ * Strip RisuAI-internal tags from message content.
+ * LBI pre31 stripped {{inlay::...}} and <qak> tags before sending;
+ * V3 plugins must do the same to avoid leaking internal markup to API.
+ */
+function stripInternalTags(text) {
+    if (typeof text !== 'string') return text;
+    return text
+        .replace(/\{\{(?:inlayed|inlay)::[^}]*\}\}/g, '')
+        .replace(/<qak>|<\/qak>/g, '')
+        .trim();
+}
+
+/**
+ * Deep-sanitize a messages array: remove null/undefined entries,
+ * strip internal RisuAI tags, and filter messages with truly empty content.
+ * Returns a NEW array — never mutates the input.
+ */
+function sanitizeMessages(messages) {
+    if (!Array.isArray(messages)) return [];
+    return messages
+        .filter(m => m != null && typeof m === 'object' && typeof m.role === 'string')
+        .map(m => {
+            const cleaned = { ...m };
+            if (typeof cleaned.content === 'string') {
+                cleaned.content = stripInternalTags(cleaned.content);
+            }
+            return cleaned;
+        });
+}
+
+/**
+ * Absolute last-line-of-defense: parse a JSON body string, filter null entries
+ * from the messages/contents arrays, and re-stringify.
+ * Guarantees no null array elements reach the API regardless of any upstream bug.
+ */
+function sanitizeBodyJSON(jsonStr) {
+    try {
+        const obj = JSON.parse(jsonStr);
+        if (Array.isArray(obj.messages)) {
+            const before = obj.messages.length;
+            obj.messages = obj.messages.filter(m => m != null && typeof m === 'object');
+            if (obj.messages.length < before) {
+                console.warn(`[Cupcake PM] ⚠️ JSON-level sanitization removed ${before - obj.messages.length} null entries from messages`);
+            }
+        }
+        if (Array.isArray(obj.contents)) {
+            const before = obj.contents.length;
+            obj.contents = obj.contents.filter(m => m != null && typeof m === 'object');
+            if (obj.contents.length < before) {
+                console.warn(`[Cupcake PM] ⚠️ JSON-level sanitization removed ${before - obj.contents.length} null entries from contents`);
+            }
+        }
+        return JSON.stringify(obj);
+    } catch (e) {
+        // If parse fails, return original string
+        return jsonStr;
     }
 }
 
@@ -660,7 +720,8 @@ async function inferSlot(activeModelDef) {
 }
 
 function formatToOpenAI(messages, config = {}) {
-    let msgs = [...messages].filter(m => m != null && typeof m === 'object');
+    // Step 1: Deep sanitize — remove nulls, strip internal RisuAI tags
+    let msgs = sanitizeMessages(messages);
 
     if (config.mergesys) {
         let sysPrompt = "";
@@ -707,7 +768,7 @@ function formatToOpenAI(messages, config = {}) {
         }
         if (m.name) msg.name = m.name;
         return msg;
-    }).filter(m => m != null);
+    }).filter(m => m != null && typeof m === 'object');
 
     if (config.sysfirst) {
         const firstIdx = arr.findIndex(m => m.role === 'system');
@@ -721,7 +782,7 @@ function formatToOpenAI(messages, config = {}) {
 }
 
 function formatToAnthropic(messages, config = {}) {
-    const validMsgs = messages.filter(m => m != null && typeof m === 'object');
+    const validMsgs = sanitizeMessages(messages);
     const systemMsgs = validMsgs.filter(m => m.role === 'system');
     const chatMsgs = validMsgs.filter(m => m.role !== 'system');
     const systemPrompt = systemMsgs.map(m => typeof m.content === 'string' ? m.content : JSON.stringify(m.content)).join('\n\n');
@@ -743,7 +804,7 @@ function formatToAnthropic(messages, config = {}) {
 }
 
 function formatToGemini(messagesRaw, config = {}) {
-    const messages = messagesRaw.filter(m => m != null && typeof m === 'object');
+    const messages = sanitizeMessages(messagesRaw);
     const systemInstruction = [];
     const contents = [];
     for (const m of messages) {
@@ -1062,8 +1123,8 @@ async function ensureCopilotApiToken() {
 // ==========================================
 
 async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abortSignal) {
-    // Defensive: filter null/undefined entries that may leak from RisuAI pipeline
-    const messages = messagesRaw.filter(m => m != null && typeof m === 'object');
+    // Defensive: deep-sanitize messages (null filter + tag strip + role validation)
+    const messages = sanitizeMessages(messagesRaw);
     const format = config.format || 'openai';
     let formattedMessages;
     let systemPrompt = '';
@@ -1164,7 +1225,12 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
         try {
             const extra = JSON.parse(config.customParams);
             if (typeof extra === 'object' && extra !== null) {
-                Object.assign(body, extra);
+                // Protect: do NOT allow customParams to overwrite messages/contents arrays
+                // (they were already sanitized above — overwriting would bypass all null filters)
+                const safeExtra = { ...extra };
+                delete safeExtra.messages;
+                delete safeExtra.contents;
+                Object.assign(body, safeExtra);
             }
         } catch (e) {
             console.error('[Cupcake PM] Failed to parse customParams JSON for Custom Model:', e);
@@ -1223,7 +1289,7 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
         const res = await Risuai.nativeFetch(streamUrl, {
             method: 'POST',
             headers,
-            body: JSON.stringify(streamBody)
+            body: sanitizeBodyJSON(JSON.stringify(streamBody))
             // NOTE: signal: abortSignal removed — AbortSignal can't cross V3 iframe bridge (postMessage structured clone)
         });
 
@@ -1242,7 +1308,7 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
     const res = await Risuai.nativeFetch(config.url, {
         method: 'POST',
         headers,
-        body: JSON.stringify(body)
+        body: sanitizeBodyJSON(JSON.stringify(body))
         // NOTE: signal: abortSignal removed — AbortSignal can't cross V3 iframe bridge (postMessage structured clone)
     });
 
@@ -1274,9 +1340,10 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
 async function fetchByProviderId(modelDef, args, abortSignal) {
     const temp = args.temperature || 0.7;
     const maxTokens = args.max_tokens || 4096;
-    // Filter null/undefined entries from messages — RisuAI's runTrigger (JSON round-trip)
-    // and replacerbeforeRequest hooks can introduce null entries in prompt_chat.
-    const messages = (args.prompt_chat || []).filter(m => m != null && typeof m === 'object');
+    // Deep-sanitize messages — RisuAI's runTrigger (JSON round-trip), V3 iframe
+    // postMessage bridge, and replacerbeforeRequest hooks can introduce null entries
+    // or leave internal tags ({{inlay::...}}, <qak>) in prompt_chat.
+    const messages = sanitizeMessages(args.prompt_chat);
 
     try {
         // Dynamic provider lookup from registered sub-plugins
