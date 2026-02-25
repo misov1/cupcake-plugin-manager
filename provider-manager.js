@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.10.0
+//@version 1.10.1
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.10.0';
+const CPM_VERSION = '1.10.1';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -145,18 +145,41 @@ function stripInternalTags(text) {
  * Deep-sanitize a messages array: remove null/undefined entries,
  * strip internal RisuAI tags, and filter messages with truly empty content.
  * Returns a NEW array — never mutates the input.
+ *
+ * Validates: non-null object, has string role, content is not null/undefined.
+ * Messages with null content are removed because they cause API 400 errors
+ * ("expected an object, but got null instead").
  */
 function sanitizeMessages(messages) {
     if (!Array.isArray(messages)) return [];
-    return messages
-        .filter(m => m != null && typeof m === 'object' && typeof m.role === 'string')
-        .map(m => {
-            const cleaned = { ...m };
-            if (typeof cleaned.content === 'string') {
-                cleaned.content = stripInternalTags(cleaned.content);
-            }
-            return cleaned;
-        });
+    const result = [];
+    for (let i = 0; i < messages.length; i++) {
+        const m = messages[i];
+        // Skip null, undefined, non-objects
+        if (m == null || typeof m !== 'object') {
+            console.warn(`[Cupcake PM] sanitizeMessages: skipped non-object at index ${i} (type=${typeof m})`);
+            continue;
+        }
+        // Skip messages without a valid string role
+        if (typeof m.role !== 'string' || !m.role) {
+            console.warn(`[Cupcake PM] sanitizeMessages: skipped message with invalid role at index ${i} (role=${JSON.stringify(m.role)})`);
+            continue;
+        }
+        // Skip messages where content is explicitly null/undefined
+        // (These survive JSON round-trips and cause API "null message" errors)
+        if (m.content === null || m.content === undefined) {
+            console.warn(`[Cupcake PM] sanitizeMessages: skipped message with null/undefined content at index ${i} (role=${m.role})`);
+            continue;
+        }
+        const cleaned = { ...m };
+        // Strip toJSON if somehow inherited (prevents JSON.stringify producing null)
+        if (typeof cleaned.toJSON === 'function') delete cleaned.toJSON;
+        if (typeof cleaned.content === 'string') {
+            cleaned.content = stripInternalTags(cleaned.content);
+        }
+        result.push(cleaned);
+    }
+    return result;
 }
 
 /**
@@ -164,35 +187,57 @@ function sanitizeMessages(messages) {
  * from the messages/contents arrays, and re-stringify.
  * Guarantees no null array elements reach the API regardless of any upstream bug.
  * Also deep-scans to remove any message whose 'content' field is null/undefined.
+ *
+ * CRITICAL: This is the final safeguard before the body crosses the V3 iframe
+ * bridge (postMessage) and reaches the RisuAI proxy. Neither of those layers
+ * are under our control, so we must ensure the JSON is absolutely clean here.
  */
 function sanitizeBodyJSON(jsonStr) {
     try {
         const obj = JSON.parse(jsonStr);
         if (Array.isArray(obj.messages)) {
             const before = obj.messages.length;
-            obj.messages = obj.messages.filter(m => {
-                if (m == null || typeof m !== 'object') return false;
+            obj.messages = obj.messages.filter((m, idx) => {
+                if (m == null) {
+                    console.warn(`[Cupcake PM] ⚠️ sanitizeBodyJSON: removed NULL at messages[${idx}]`);
+                    return false;
+                }
+                if (typeof m !== 'object') {
+                    console.warn(`[Cupcake PM] ⚠️ sanitizeBodyJSON: removed non-object at messages[${idx}] (type=${typeof m})`);
+                    return false;
+                }
                 // Remove messages with null/undefined content (API rejects these)
                 if (m.content === null || m.content === undefined) {
-                    console.warn(`[Cupcake PM] ⚠️ Removed message with null content (role=${m.role})`);
+                    console.warn(`[Cupcake PM] ⚠️ sanitizeBodyJSON: removed message with null content at messages[${idx}] (role=${m.role})`);
+                    return false;
+                }
+                // Remove messages with missing/invalid role
+                if (typeof m.role !== 'string' || !m.role) {
+                    console.warn(`[Cupcake PM] ⚠️ sanitizeBodyJSON: removed message with invalid role at messages[${idx}]`);
                     return false;
                 }
                 return true;
             });
             if (obj.messages.length < before) {
-                console.warn(`[Cupcake PM] ⚠️ JSON-level sanitization removed ${before - obj.messages.length} null/invalid entries from messages (was ${before}, now ${obj.messages.length})`);
+                console.warn(`[Cupcake PM] ⚠️ sanitizeBodyJSON: total removed ${before - obj.messages.length} invalid entries from messages (was ${before}, now ${obj.messages.length})`);
             }
         }
         if (Array.isArray(obj.contents)) {
             const before = obj.contents.length;
-            obj.contents = obj.contents.filter(m => m != null && typeof m === 'object');
+            obj.contents = obj.contents.filter((m, idx) => {
+                if (m == null || typeof m !== 'object') {
+                    console.warn(`[Cupcake PM] ⚠️ sanitizeBodyJSON: removed null/invalid entry from contents[${idx}]`);
+                    return false;
+                }
+                return true;
+            });
             if (obj.contents.length < before) {
-                console.warn(`[Cupcake PM] ⚠️ JSON-level sanitization removed ${before - obj.contents.length} null entries from contents`);
+                console.warn(`[Cupcake PM] ⚠️ sanitizeBodyJSON: removed ${before - obj.contents.length} null entries from contents`);
             }
         }
         return JSON.stringify(obj);
     } catch (e) {
-        // If parse fails, return original string
+        console.error('[Cupcake PM] sanitizeBodyJSON: JSON parse/stringify failed:', e.message);
         return jsonStr;
     }
 }
@@ -209,6 +254,19 @@ function sanitizeBodyJSON(jsonStr) {
  * Returns a native Response object, compatible with streaming.
  */
 async function smartNativeFetch(url, options = {}) {
+    // ── Final body sanitization before any network call ──
+    // The body string was already sanitized by sanitizeBodyJSON at the callsite,
+    // but we run it ONE MORE TIME here as an absolute last defense.
+    // This catches any theoretical corruption between the callsite and here
+    // (e.g., prototype pollution, toJSON override, async race conditions).
+    if (options.method === 'POST' && typeof options.body === 'string') {
+        try {
+            options = { ...options, body: sanitizeBodyJSON(options.body) };
+        } catch (e) {
+            console.error('[CupcakePM] smartNativeFetch: body re-sanitization failed:', e.message);
+        }
+    }
+
     // Strategy 1: Direct browser fetch (bypasses proxy)
     try {
         const res = await fetch(url, options);
@@ -774,16 +832,22 @@ function formatToOpenAI(messages, config = {}) {
         }
     }
 
-    let arr = msgs.map(m => {
-        if (!m || typeof m !== 'object') return null;
-        const msg = { role: m.role || 'user', content: '' };
+    let arr = [];
+    for (let i = 0; i < msgs.length; i++) {
+        const m = msgs[i];
+        if (!m || typeof m !== 'object') continue;
+        // Validate role exists and is a string
+        const role = typeof m.role === 'string' ? m.role : 'user';
+        if (!role) continue;
+        const msg = { role, content: '' };
         if (config.altrole && msg.role === 'assistant') msg.role = 'model';
         // Handle multimodals (images/audio) → OpenAI vision format (like LBI pre31)
         if (m.multimodals && Array.isArray(m.multimodals) && m.multimodals.length > 0) {
             const contentParts = [];
-            const textContent = typeof m.content === 'string' ? m.content.trim() : String(m.content || '').trim();
+            const textContent = typeof m.content === 'string' ? m.content.trim() : String(m.content ?? '').trim();
             if (textContent) contentParts.push({ type: 'text', text: textContent });
             for (const modal of m.multimodals) {
+                if (!modal || typeof modal !== 'object') continue;
                 if (modal.type === 'image') {
                     contentParts.push({ type: 'image_url', image_url: { url: modal.base64 } });
                 } else if (modal.type === 'audio') {
@@ -794,13 +858,19 @@ function formatToOpenAI(messages, config = {}) {
         } else if (typeof m.content === 'string') {
             msg.content = m.content;
         } else if (Array.isArray(m.content)) {
-            msg.content = m.content;
+            // Filter null entries from content array (vision/audio parts)
+            msg.content = m.content.filter(p => p != null && typeof p === 'object');
         } else {
-            msg.content = String(m.content || '');
+            msg.content = String(m.content ?? '');
         }
-        if (m.name) msg.name = m.name;
-        return msg;
-    }).filter(m => m != null && typeof m === 'object');
+        // Final validation: ensure msg.content is valid (not null/undefined)
+        if (msg.content === null || msg.content === undefined) {
+            console.warn(`[Cupcake PM] formatToOpenAI: skipped message with null content after formatting (index=${i}, role=${role})`);
+            continue;
+        }
+        if (m.name && typeof m.name === 'string') msg.name = m.name;
+        arr.push(msg);
+    }
 
     if (config.sysfirst) {
         const firstIdx = arr.findIndex(m => m.role === 'system');
@@ -1383,7 +1453,16 @@ async function fetchByProviderId(modelDef, args, abortSignal) {
     // Deep-sanitize messages — RisuAI's runTrigger (JSON round-trip), V3 iframe
     // postMessage bridge, and replacerbeforeRequest hooks can introduce null entries
     // or leave internal tags ({{inlay::...}}, <qak>) in prompt_chat.
-    const messages = sanitizeMessages(args.prompt_chat);
+    const rawChat = args.prompt_chat;
+    // Diagnostic: check for null entries in raw prompt_chat (helps identify upstream source)
+    if (Array.isArray(rawChat)) {
+        const nullCount = rawChat.filter(m => m == null).length;
+        const badContentCount = rawChat.filter(m => m != null && typeof m === 'object' && (m.content === null || m.content === undefined)).length;
+        if (nullCount > 0 || badContentCount > 0) {
+            console.warn(`[Cupcake PM] ⚠️ prompt_chat from RisuAI has ${nullCount} null entries and ${badContentCount} null-content entries (total ${rawChat.length} messages)`);
+        }
+    }
+    const messages = sanitizeMessages(rawChat);
 
     try {
         // Dynamic provider lookup from registered sub-plugins
