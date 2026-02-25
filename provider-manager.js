@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.9.5
+//@version 1.9.6
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.9.5';
+const CPM_VERSION = '1.9.6';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -682,14 +682,32 @@ function formatToOpenAI(messages, config = {}) {
     }
 
     let arr = msgs.map(m => {
-        const msg = { role: m.role, content: '' };
+        if (!m || typeof m !== 'object') return null;
+        const msg = { role: m.role || 'user', content: '' };
         if (config.altrole && msg.role === 'assistant') msg.role = 'model';
-        if (typeof m.content === 'string') msg.content = m.content;
-        else if (Array.isArray(m.content)) msg.content = m.content;
-        else msg.content = String(m.content || '');
+        // Handle multimodals (images/audio) → OpenAI vision format (like LBI pre31)
+        if (m.multimodals && Array.isArray(m.multimodals) && m.multimodals.length > 0) {
+            const contentParts = [];
+            const textContent = typeof m.content === 'string' ? m.content.trim() : String(m.content || '').trim();
+            if (textContent) contentParts.push({ type: 'text', text: textContent });
+            for (const modal of m.multimodals) {
+                if (modal.type === 'image') {
+                    contentParts.push({ type: 'image_url', image_url: { url: modal.base64 } });
+                } else if (modal.type === 'audio') {
+                    contentParts.push({ type: 'input_audio', input_audio: { data: (modal.base64 || '').split(',')[1] || modal.base64, format: (modal.base64 || '').includes('wav') ? 'wav' : 'mp3' } });
+                }
+            }
+            msg.content = contentParts.length > 0 ? contentParts : (textContent || '');
+        } else if (typeof m.content === 'string') {
+            msg.content = m.content;
+        } else if (Array.isArray(m.content)) {
+            msg.content = m.content;
+        } else {
+            msg.content = String(m.content || '');
+        }
         if (m.name) msg.name = m.name;
         return msg;
-    });
+    }).filter(m => m != null);
 
     if (config.sysfirst) {
         const firstIdx = arr.findIndex(m => m.role === 'system');
@@ -1102,6 +1120,24 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
         body.messages = formattedMessages;
     }
 
+    // ===== FINAL SAFETY: filter any null/undefined from messages array =====
+    // This is the absolute last defense before JSON.stringify — catches nulls
+    // from any source (RisuAI runTrigger JSON round-trip, replacerbeforeRequest, etc.)
+    if (body.messages) {
+        const before = body.messages.length;
+        body.messages = body.messages.filter(m => m != null && typeof m === 'object');
+        if (body.messages.length < before) {
+            console.warn(`[Cupcake PM] ⚠️ Removed ${before - body.messages.length} null/invalid entries from messages array (was ${before}, now ${body.messages.length})`);
+        }
+    }
+    if (body.contents) {
+        const before = body.contents.length;
+        body.contents = body.contents.filter(m => m != null && typeof m === 'object');
+        if (body.contents.length < before) {
+            console.warn(`[Cupcake PM] ⚠️ Removed ${before - body.contents.length} null/invalid entries from contents array`);
+        }
+    }
+
     if (config.maxout) {
         if (format === 'openai') {
             body.max_output_tokens = maxTokens;
@@ -1151,6 +1187,10 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
         }
         headers['Copilot-Integration-Id'] = 'vscode-chat';
         headers['X-Request-Id'] = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString();
+        // Copilot-Vision-Request header (LBI pre31 pattern): detect vision content in messages
+        if (body.messages && body.messages.some(m => Array.isArray(m?.content) && m.content.some(p => p.type === 'image_url'))) {
+            headers['Copilot-Vision-Request'] = 'true';
+        }
     }
 
     // --- Streaming support ---
@@ -1170,6 +1210,14 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
         } else {
             // OpenAI-compatible
             streamBody.stream = true;
+        }
+
+        // Final safety: ensure no nulls in streaming body messages array
+        if (streamBody.messages) {
+            streamBody.messages = streamBody.messages.filter(m => m != null && typeof m === 'object');
+        }
+        if (streamBody.contents) {
+            streamBody.contents = streamBody.contents.filter(m => m != null && typeof m === 'object');
         }
 
         const res = await Risuai.nativeFetch(streamUrl, {
