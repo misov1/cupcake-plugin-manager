@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.10.2
+//@version 1.10.3
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.10.2';
+const CPM_VERSION = '1.10.3';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -1724,11 +1724,11 @@ async function handleRequest(args, activeModelDef, abortSignal) {
             return a.name.localeCompare(b.name);
         });
 
-        // Explicitly format names identical to LBI: `[Cupcake PM] [GoogleAI] Gemini 2.5 Flash`
+        // Format: `🧁 [GoogleAI] Gemini 2.5 Flash`
         for (const modelDef of ALL_DEFINED_MODELS) {
             let pLabel = modelDef.provider;
             let mLabel = modelDef.name;
-            await Risuai.addProvider(`[Cupcake PM] [${pLabel}] ${mLabel}`, async (args, abortSignal) => {
+            await Risuai.addProvider(`🧁 [${pLabel}] ${mLabel}`, async (args, abortSignal) => {
                 try {
                     return await handleRequest(args, modelDef, abortSignal);
                 } catch (err) {
