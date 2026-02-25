@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.8.5
+//@version 1.8.6
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.8.5';
+const CPM_VERSION = '1.8.6';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -337,77 +337,84 @@ const SubPluginManager = {
         return 0;
     },
 
-    // Check a single plugin for updates. Returns { hasUpdate, remoteVersion, remoteCode } or null on error.
-    async checkOneUpdate(plugin) {
-        const url = plugin.updateUrl;
-        if (!url) return null;
-        try {
-            // nativeFetch goes through the V3 bridge to the host, bypassing iframe CSP.
-            // Add unique random + timestamp cache buster to prevent proxy caching issues.
-            const cacheBuster = url + (url.includes('?') ? '&' : '?') + '_t=' + Date.now() + '_r=' + Math.random().toString(36).substr(2, 8);
-            console.log(`[CPM Update] Checking ${plugin.name}: ${cacheBuster}`);
-            const res = await Risuai.nativeFetch(cacheBuster, {
-                method: 'GET'
-            });
-            console.log(`[CPM Update] Response for ${plugin.name}: ok=${res.ok}, status=${res.status}`);
-            if (!res.ok) return null;
-            const remoteCode = await res.text();
-            console.log(`[CPM Update] Got ${remoteCode.length} chars for ${plugin.name}, first 80: ${remoteCode.substring(0, 80)}`);
-            const remoteMeta = this.extractMetadata(remoteCode);
-            if (!remoteMeta.version) {
-                console.warn(`[CPM Update] No version found in remote code for ${plugin.name}`);
-                return null;
-            }
-            // Validate that the remote file matches this plugin (name check)
-            if (remoteMeta.name !== plugin.name) {
-                console.warn(`[CPM Update] Name mismatch for ${plugin.name}: remote has "${remoteMeta.name}". Skipping.`);
-                return null;
-            }
-            const cmp = this.compareVersions(plugin.version || '0.0.0', remoteMeta.version);
-            console.log(`[CPM Update] ${plugin.name}: local=${plugin.version} remote=${remoteMeta.version} cmp=${cmp}`);
-            return {
-                hasUpdate: cmp > 0,
-                remoteVersion: remoteMeta.version,
-                localVersion: plugin.version || '0.0.0',
-                remoteCode,
-            };
-        } catch (e) {
-            console.error(`[CPM Update] Failed to check ${plugin.name}:`, e);
-            return null;
-        }
-    },
+    // ── Manifest-based Update System ──
+    // RisuAI's proxy2 caches ALL requests to the same domain with the first response.
+    // So we fetch ONE versions.json manifest to check all versions at once.
+    // Individual file code is fetched on-demand in applyUpdate (single request = no cache collision).
 
-    // Check all plugins that have updateUrl. Returns array of { plugin, remoteVersion, remoteCode }.
+    MANIFEST_URL: 'https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/versions.json',
+
+    // Check all plugins for updates using the manifest. Returns array of { plugin, remoteVersion, localVersion }.
     async checkAllUpdates() {
-        const results = [];
-        for (const p of this.plugins) {
-            if (!p.updateUrl) continue;
-            const info = await this.checkOneUpdate(p);
-            if (info && info.hasUpdate) {
-                results.push({ plugin: p, ...info });
+        try {
+            const cacheBuster = this.MANIFEST_URL + '?_t=' + Date.now() + '_r=' + Math.random().toString(36).substr(2, 8);
+            console.log(`[CPM Update] Fetching version manifest: ${cacheBuster}`);
+            const res = await Risuai.nativeFetch(cacheBuster, { method: 'GET' });
+            if (!res.ok) {
+                console.error(`[CPM Update] Failed to fetch manifest: ${res.status}`);
+                return [];
             }
+            const manifest = await res.json();
+            console.log(`[CPM Update] Manifest loaded:`, manifest);
+
+            const results = [];
+            for (const p of this.plugins) {
+                if (!p.updateUrl || !p.name) continue;
+                const remote = manifest[p.name];
+                if (!remote || !remote.version) {
+                    console.warn(`[CPM Update] ${p.name} not found in manifest, skipping.`);
+                    continue;
+                }
+                const cmp = this.compareVersions(p.version || '0.0.0', remote.version);
+                console.log(`[CPM Update] ${p.name}: local=${p.version} remote=${remote.version} cmp=${cmp}`);
+                if (cmp > 0) {
+                    results.push({
+                        plugin: p,
+                        remoteVersion: remote.version,
+                        localVersion: p.version || '0.0.0',
+                        remoteFile: remote.file,
+                    });
+                }
+            }
+            return results;
+        } catch (e) {
+            console.error(`[CPM Update] Failed to check updates:`, e);
+            return [];
         }
-        return results;
     },
 
-    // Apply update for a specific plugin
-    async applyUpdate(pluginId, newCode) {
+    // Fetch and apply update for a specific plugin. Downloads the individual file on-demand.
+    async applyUpdate(pluginId, remoteFile) {
         const p = this.plugins.find(x => x.id === pluginId);
         if (!p) return false;
-        const meta = this.extractMetadata(newCode);
-        // Safety check: verify the remote code's name matches the plugin being updated
-        if (meta.name && p.name && meta.name !== p.name) {
-            console.error(`[CPM Update] BLOCKED: Tried to apply "${meta.name}" code to plugin "${p.name}". IDs don't match.`);
+        try {
+            // Fetch the individual file code (single request, no proxy cache collision)
+            const fileUrl = `https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/${remoteFile}?_t=${Date.now()}`;
+            console.log(`[CPM Update] Downloading ${p.name} from: ${fileUrl}`);
+            const res = await Risuai.nativeFetch(fileUrl, { method: 'GET' });
+            if (!res.ok) {
+                console.error(`[CPM Update] Failed to download ${p.name}: ${res.status}`);
+                return false;
+            }
+            const newCode = await res.text();
+            const meta = this.extractMetadata(newCode);
+            // Safety check: verify the remote code's name matches the plugin being updated
+            if (meta.name && p.name && meta.name !== p.name) {
+                console.error(`[CPM Update] BLOCKED: Tried to apply "${meta.name}" code to plugin "${p.name}". Names don't match.`);
+                return false;
+            }
+            p.code = newCode;
+            p.name = meta.name || p.name;
+            p.version = meta.version;
+            p.description = meta.description;
+            p.icon = meta.icon;
+            p.updateUrl = meta.updateUrl || p.updateUrl;
+            await this.saveRegistry();
+            return true;
+        } catch (e) {
+            console.error(`[CPM Update] Failed to apply update for ${p.name}:`, e);
             return false;
         }
-        p.code = newCode;
-        p.name = meta.name || p.name;
-        p.version = meta.version;
-        p.description = meta.description;
-        p.icon = meta.icon;
-        p.updateUrl = meta.updateUrl || p.updateUrl;
-        await this.saveRegistry();
-        return true;
     },
 
     // ── Hot-Reload Infrastructure ──
@@ -1741,7 +1748,7 @@ async function handleRequest(args, activeModelDef, abortSignal) {
                                 let html = `<div class="bg-indigo-900/30 rounded p-3 space-y-3">`;
                                 html += `<p class="text-indigo-300 text-sm font-semibold">🔔 ${updates.length}개의 업데이트가 있습니다.</p>`;
                                 for (const u of updates) {
-                                    pendingUpdates.set(u.plugin.id, { code: u.remoteCode, name: u.plugin.name });
+                                    pendingUpdates.set(u.plugin.id, { remoteFile: u.remoteFile, name: u.plugin.name });
                                     html += `<div class="flex items-center justify-between bg-gray-800 rounded p-2">`;
                                     html += `<div><span class="text-white font-semibold">${u.plugin.icon || '🧩'} ${u.plugin.name}</span>`;
                                     html += `<span class="text-gray-400 text-xs ml-2">v${u.localVersion} → <span class="text-green-400">v${u.remoteVersion}</span></span></div>`;
@@ -1757,8 +1764,8 @@ async function handleRequest(args, activeModelDef, abortSignal) {
                                         const updateData = pendingUpdates.get(id);
                                         if (!updateData) { e.target.textContent = '❌ 데이터 없음'; return; }
                                         e.target.disabled = true;
-                                        e.target.textContent = '⏳ 적용 중...';
-                                        const ok = await SubPluginManager.applyUpdate(id, updateData.code);
+                                        e.target.textContent = '⏳ 다운로드 중...';
+                                        const ok = await SubPluginManager.applyUpdate(id, updateData.remoteFile);
                                         if (ok) {
                                             // Hot-reload: 즉시 적용 (새로고침 불필요)
                                             await SubPluginManager.hotReload(id);
