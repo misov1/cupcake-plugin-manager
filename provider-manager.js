@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.9.7
+//@version 1.9.8
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.9.7';
+const CPM_VERSION = '1.9.8';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -1149,8 +1149,15 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
     const body = {
         model: config.model,
         temperature: temp,
-        max_tokens: maxTokens,
     };
+
+    // max_tokens vs max_completion_tokens: newer OpenAI models require max_completion_tokens
+    const _needsMCT = (model) => { if (!model) return false; return /^(gpt-5|o[1-9])/i.test(model); };
+    if (format === 'openai' && _needsMCT(config.model)) {
+        body.max_completion_tokens = maxTokens;
+    } else {
+        body.max_tokens = maxTokens;
+    }
     if (args.top_p !== undefined && args.top_p !== null) body.top_p = args.top_p;
     if (args.top_k !== undefined && args.top_k !== null) body.top_k = args.top_k;
     if (args.frequency_penalty !== undefined && args.frequency_penalty !== null) body.frequency_penalty = args.frequency_penalty;
@@ -1203,6 +1210,7 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
         if (format === 'openai') {
             body.max_output_tokens = maxTokens;
             delete body.max_tokens;
+            delete body.max_completion_tokens;
         } else if (format === 'google') {
             body.generationConfig.maxOutputTokens = maxTokens;
         }

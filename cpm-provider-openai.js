@@ -1,5 +1,5 @@
 // @name CPM Provider - OpenAI
-// @version 1.2.3
+// @version 1.3.0
 // @description OpenAI provider for Cupcake PM (Streaming)
 // @icon 🟢
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-openai.js
@@ -74,19 +74,51 @@
                 servicetier: await CPM.safeGetArg('common_openai_servicetier'),
             };
 
+            // Helper: detect models that require max_completion_tokens instead of max_tokens
+            const needsMaxCompletionTokens = (model) => {
+                if (!model) return false;
+                const m = model.toLowerCase();
+                return /^(gpt-5|o[1-9])/.test(m);
+            };
+
+            // Helper: validate service_tier value
+            const validServiceTiers = new Set(['auto', 'flex', 'default']);
+
             const url = config.url || 'https://api.openai.com/v1/chat/completions';
+            const modelName = config.model || 'gpt-4o';
+            const formattedMessages = CPM.formatToOpenAI(messages, config);
+
             const body = {
-                model: config.model || 'gpt-4o',
-                messages: CPM.formatToOpenAI(messages, config),
+                model: modelName,
+                messages: Array.isArray(formattedMessages) ? formattedMessages.filter(m => m != null && typeof m === 'object') : [],
                 temperature: temp,
-                max_tokens: maxTokens,
                 stream: true,
             };
+
+            // max_tokens vs max_completion_tokens: newer models require max_completion_tokens
+            if (needsMaxCompletionTokens(modelName)) {
+                body.max_completion_tokens = maxTokens;
+            } else {
+                body.max_tokens = maxTokens;
+            }
+
             if (args.top_p !== undefined && args.top_p !== null) body.top_p = args.top_p;
             if (args.frequency_penalty !== undefined && args.frequency_penalty !== null) body.frequency_penalty = args.frequency_penalty;
             if (args.presence_penalty !== undefined && args.presence_penalty !== null) body.presence_penalty = args.presence_penalty;
-            if (config.servicetier && config.servicetier.trim() !== '') body.service_tier = config.servicetier;
-            if (config.maxout) { body.max_output_tokens = maxTokens; delete body.max_tokens; }
+
+            // service_tier: only send known valid lowercase values, skip empty/'auto' (default)
+            if (config.servicetier) {
+                const tier = config.servicetier.trim().toLowerCase();
+                if (tier && tier !== 'auto' && validServiceTiers.has(tier)) {
+                    body.service_tier = tier;
+                }
+            }
+
+            if (config.maxout) {
+                body.max_output_tokens = maxTokens;
+                delete body.max_tokens;
+                delete body.max_completion_tokens;
+            }
             if (config.reasoning && config.reasoning !== 'none') { body.reasoning_effort = config.reasoning; delete body.temperature; }
             if (config.verbosity && config.verbosity !== 'none') body.verbosity = config.verbosity;
 
@@ -107,7 +139,18 @@
                 headers['X-Request-Id'] = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString();
             }
 
-            const res = await Risuai.nativeFetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+            // Final safety: sanitize JSON body to remove any null message entries
+            const bodyJSON = JSON.stringify(body);
+            let safeBody = bodyJSON;
+            try {
+                const parsed = JSON.parse(bodyJSON);
+                if (Array.isArray(parsed.messages)) {
+                    parsed.messages = parsed.messages.filter(m => m != null && typeof m === 'object');
+                }
+                safeBody = JSON.stringify(parsed);
+            } catch (_) { /* use original */ }
+
+            const res = await Risuai.nativeFetch(url, { method: 'POST', headers, body: safeBody });
             if (!res.ok) return { success: false, content: `[OpenAI Error ${res.status}] ${await res.text()}` };
             return { success: true, content: CPM.createSSEStream(res, CPM.parseOpenAISSELine, abortSignal) };
         },
