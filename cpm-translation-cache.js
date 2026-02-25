@@ -1,7 +1,7 @@
 //@name CPM Component - Translation Cache Manager
 //@display-name Cupcake Translation Cache
 //@api 3.0
-//@version 1.2.0
+//@version 1.2.1
 //@author Cupcake
 //@description 번역 캐시를 검색·조회·수정하고, 사용자 번역 사전으로 표시 번역을 교정하는 관리 도구입니다.
 //@icon 💾
@@ -284,6 +284,17 @@
         await loadCorrections();
         const corrCount = Object.keys(_corrections).length;
         console.log(`${LOG_TAG} Init: ${corrCount} corrections loaded, display=${_displayEnabled}`);
+
+        // 타임스탬프 스냅샷 자동 생성 — 플러그인 로드 시 현재 캐시 상태를 기록하여
+        // 설정창을 열지 않아도 이후 번역/재번역 변경을 감지할 수 있게 합니다.
+        if (canSearchCache) {
+            try {
+                await loadAllCache();
+                console.log(`${LOG_TAG} Init: timestamp snapshot taken (${_allCacheEntries ? _allCacheEntries.length : 0} entries)`);
+            } catch (e) {
+                console.warn(`${LOG_TAG} Init: snapshot failed (non-critical):`, e);
+            }
+        }
     })();
 
     // ==========================================
@@ -972,5 +983,5 @@
         }
     });
 
-    console.log(`${LOG_TAG} Translation Cache Manager v1.2.0 registered — sidebar: 💾 번역 캐시`);
+    console.log(`${LOG_TAG} Translation Cache Manager v1.2.1 registered — sidebar: 💾 번역 캐시`);
 })();

@@ -36,7 +36,7 @@
         "file": "cpm-copilot-manager.js"
     },
     "CPM Component - Translation Cache Manager": {
-        "version": "1.2.0",
+        "version": "1.2.1",
         "file": "cpm-translation-cache.js"
     }
 }
