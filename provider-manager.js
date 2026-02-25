@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.8.8
+//@version 1.8.9
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.8.8';
+const CPM_VERSION = '1.8.9';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -390,13 +390,21 @@ const SubPluginManager = {
         const p = this.plugins.find(x => x.id === pluginId);
         if (!p) return false;
         try {
-            // Use plain fetch (not Risuai.nativeFetch) — GitHub raw supports CORS (Access-Control-Allow-Origin: *)
-            // so direct fetch works from the sandboxed iframe. Risuai.nativeFetch goes through proxy2 which
-            // can corrupt or cache GET responses incorrectly. Do NOT add custom headers — they trigger
-            // CORS preflight which raw.githubusercontent.com does not support.
-            const fileUrl = `https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/${remoteFile}?_t=${Date.now()}`;
+            // Smart fetch: try direct fetch first (works in Tauri/desktop where CSP isn't restrictive),
+            // fall back to Risuai.nativeFetch for web (about:srcdoc iframe) where CSP blocks
+            // connect-src to raw.githubusercontent.com. nativeFetch routes through the parent window
+            // via postMessage, bypassing iframe CSP restrictions.
+            // Cache-buster param ensures proxy2 treats each request as unique.
+            const fileUrl = `https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/${remoteFile}?_t=${Date.now()}_r=${Math.random().toString(36).substr(2, 6)}`;
             console.log(`[CPM Update] Downloading ${p.name} from: ${fileUrl}`);
-            const res = await fetch(fileUrl, { method: 'GET', cache: 'no-store' });
+            let res;
+            try {
+                res = await fetch(fileUrl, { method: 'GET', cache: 'no-store' });
+            } catch (fetchErr) {
+                // Direct fetch blocked by CSP or network error — fall back to nativeFetch
+                console.log(`[CPM Update] Direct fetch blocked (CSP/network), falling back to nativeFetch for ${p.name}`);
+                res = await Risuai.nativeFetch(fileUrl, { method: 'GET' });
+            }
             if (!res.ok) {
                 console.error(`[CPM Update] Failed to download ${p.name}: ${res.status}`);
                 return false;
