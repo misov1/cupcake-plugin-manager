@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.10.3
+//@version 1.10.4
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.10.3';
+const CPM_VERSION = '1.10.4';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -1571,15 +1571,20 @@ async function handleRequest(args, activeModelDef, abortSignal) {
 
     const result = await fetchByProviderId(targetDef, args, abortSignal);
 
-    // Stream bridge fallback: if the result contains a ReadableStream but the
-    // iframe bridge can't transfer it, consume the stream into a plain string.
-    // This avoids DataCloneError while keeping the streaming code path intact.
-    // When RisuAI patches the Guest bridge, this automatically enables real streaming.
+    // ALWAYS collect ReadableStream into a plain string before returning.
+    //
+    // Why: RisuAI's requestPlugin returns type:'streaming' when content is a
+    // ReadableStream, but translateLLM (LLM translation) rejects streaming
+    // responses and skips cache saving. Since V3 bridge overrides mode to 'v3',
+    // the plugin cannot distinguish translation from chat requests.
+    //
+    // By always returning a string, requestPlugin returns type:'success',
+    // which allows translateLLM to properly cache retranslated results.
+    // For chat, the full response appears at once (no progressive streaming),
+    // but this is the expected behavior in V3 sandboxed iframe environments
+    // where ReadableStream transfer is unreliable.
     if (result && result.success && result.content instanceof ReadableStream) {
-        const canStream = await checkStreamCapability();
-        if (!canStream) {
-            result.content = await collectStream(result.content);
-        }
+        result.content = await collectStream(result.content);
     }
 
     return result;
