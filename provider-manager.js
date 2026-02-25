@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.9.1
+//@version 1.9.2
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.9.1';
+const CPM_VERSION = '1.9.2';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -338,13 +338,15 @@ const SubPluginManager = {
     },
 
     // ── Single-Bundle Update System ──
-    // RisuAI's proxy2 caches ALL nativeFetch responses PER-DOMAIN with the first response.
-    // Problem: @update-url fetches provider-manager.js from Vercel → poisons entire Vercel domain.
-    //          Any subsequent nativeFetch to Vercel (e.g. versions.json) returns cached JS code.
+    // RisuAI's proxy2 (sv.risuai.xyz/proxy2) caches ALL nativeFetch responses PER-DOMAIN.
+    // The @update-url check, other plugins, etc. can poison raw.githubusercontent.com and
+    // cupcake-plugin-manager.vercel.app in proxy2's cache.
     //
-    // Solution: ONE request to GitHub raw for a combined update-bundle.json containing
-    //   { versions: { name → {version, file} }, code: { file → code } }
-    // This avoids Vercel entirely and needs only ONE nativeFetch to GitHub raw.
+    // Solution: Use risuFetch with plainFetchForce: true
+    //   - Executes fetch() in the HOST WINDOW (bypasses iframe CSP)
+    //   - Bypasses proxy2 entirely (direct browser fetch, no cloud proxy)
+    //   - GitHub raw supports CORS (Access-Control-Allow-Origin: *) so direct fetch works
+    //   - Returns { ok, data, headers, status } with auto-parsed JSON
 
     UPDATE_BUNDLE_URL: 'https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/update-bundle.json',
 
@@ -353,19 +355,25 @@ const SubPluginManager = {
     async checkAllUpdates() {
         try {
             const cacheBuster = this.UPDATE_BUNDLE_URL + '?_t=' + Date.now() + '_r=' + Math.random().toString(36).substr(2, 8);
-            console.log(`[CPM Update] Fetching update bundle: ${cacheBuster}`);
-            let res;
-            try {
-                res = await fetch(cacheBuster, { method: 'GET', cache: 'no-store' });
-            } catch (fetchErr) {
-                console.log(`[CPM Update] Direct fetch blocked (CSP), falling back to nativeFetch`);
-                res = await Risuai.nativeFetch(cacheBuster, { method: 'GET' });
-            }
-            if (!res.ok) {
-                console.error(`[CPM Update] Failed to fetch update bundle: ${res.status}`);
+            console.log(`[CPM Update] Fetching update bundle via risuFetch(plainFetchForce): ${cacheBuster}`);
+
+            // risuFetch with plainFetchForce: true
+            //   - Runs fetch() in the HOST window (not the sandboxed iframe) → bypasses CSP
+            //   - plainFetchForce bypasses proxy2 entirely → no cache poisoning
+            //   - GitHub raw supports CORS → direct browser fetch works
+            //   - Returns { ok, data, headers, status } with data auto-parsed as JSON
+            const result = await Risuai.risuFetch(cacheBuster, {
+                method: 'GET',
+                plainFetchForce: true,
+            });
+
+            if (!result.ok) {
+                console.error(`[CPM Update] Failed to fetch update bundle: ${result.status}`);
                 return [];
             }
-            const bundle = await res.json();
+
+            // risuFetch auto-parses JSON, so result.data is already an object
+            const bundle = (typeof result.data === 'string') ? JSON.parse(result.data) : result.data;
             const manifest = bundle.versions || {};
             const codeBundle = bundle.code || {};
             console.log(`[CPM Update] Bundle loaded: ${Object.keys(manifest).length} versions, ${Object.keys(codeBundle).length} code files`);
