@@ -1,7 +1,7 @@
 # Cupcake Provider Manager — Sub-Plugin Development Guide
 
-> **Last Updated:** 2025-01-14  
-> **CPM Version:** 1.9.8+  
+> **Last Updated:** 2026-02-26  
+> **CPM Version:** 1.10.7+  
 > **RisuAI Compatibility:** V3 (iframe-sandboxed plugins)
 
 ---
@@ -65,11 +65,12 @@ RisuAI V3 App
 
 ### Data Flow
 
-1. RisuAI calls `addProvider` callback with `(args, modelDef, abortSignal)`
+1. RisuAI calls `addProvider` callback with `(args, abortSignal)` — the `modelDef` is captured via closure
 2. CPM's `handleRequest()` identifies the provider from `modelDef.provider`
 3. Looks up `customFetchers[provider]` (registered by sub-plugin)
 4. Calls `fetcher(modelDef, messages, temp, maxTokens, args, abortSignal)`
 5. Sub-plugin fetches the API, returns `{ success, content }` (string or ReadableStream)
+6. **Important:** `handleRequest()` always collects ReadableStream into a plain string before returning (see §6.3 note)
 
 ---
 
@@ -194,7 +195,8 @@ const CPM = window.CupcakePM;
 | `CPM.safeGetArg(key, defaultValue?)` | Async Function | Read a plugin argument safely (see §11) |
 | `CPM.safeGetBoolArg(key)` | Async Function | Read a boolean plugin argument |
 | `CPM.setArg(key, value)` | Function | Write a plugin argument |
-| `CPM.smartFetch(url, options?)` | Async Function | Browser fetch → fallback to nativeFetch (see §11) |
+| `CPM.smartFetch(url, options?)` | Async Function | 3-strategy fetch: direct → nativeFetch → risuFetch (see §11) |
+| `CPM.smartNativeFetch(url, options?)` | Async Function | Alias for `smartFetch` — explicitly named for streaming use |
 | `CPM.checkStreamCapability()` | Async Function | Test if ReadableStream can cross iframe bridge |
 | `CPM.AwsV4Signer` | Class | AWS Signature V4 signer (for Bedrock) |
 | `CPM.addCustomModel(modelDef, tag?)` | Function | Programmatically add a Custom Model |
@@ -212,7 +214,7 @@ Since sub-plugins run inside CPM's iframe, you also have access to:
 | `Risuai.nativeFetch(url, options)` | Cross-origin fetch via RisuAI's native bridge |
 | `Risuai.risuFetch(url, options)` | RisuAI fetch with special modes (plainFetchForce, etc.) |
 | `risuai.setArgument(key, value)` | Persist a plugin argument |
-| `risuai.getArgument(key)` | Read a plugin argument |
+| `Risuai.getArgument(key)` | Read a plugin argument (note: capital `R`) |
 | `risuai.pluginStorage` | `.getItem(key)` / `.setItem(key, value)` for persistent storage |
 
 ---
@@ -268,9 +270,11 @@ async function fetcher(modelDef, messages, temp, maxTokens, args, abortSignal) {
 ```
 
 **Return format:**
-- `{ success: true, content: ReadableStream }` — Streaming response (preferred)
+- `{ success: true, content: ReadableStream }` — Streaming response (sub-plugin may return this)
 - `{ success: true, content: "full text" }` — Non-streaming response  
 - `{ success: false, content: "[Error] message" }` — Error
+
+> **⚠️ Note:** Even if a sub-plugin returns a `ReadableStream`, CPM's `handleRequest()` **always collects it into a plain string** before returning to RisuAI. This is because RisuAI's `translateLLM` (translation mode) rejects streaming responses and skips cache saving. Since the V3 bridge overrides `mode` to `'v3'`, CPM cannot distinguish translation from chat requests. The result is that chat responses appear all at once (no progressive streaming), which is expected behavior in V3 sandboxed iframe environments.
 
 **Important notes:**
 - `messages` are already sanitized by CPM (null filtering, internal tag stripping)
@@ -334,11 +338,20 @@ const formatted = CPM.formatToOpenAI(messages, {
 // Returns: Array<{role, content, name?}>
 ```
 
-**Handles multimodals:** If a message has `multimodals` array (images/audio), converts to OpenAI vision format:
+**Handles multimodals:** If a message has `multimodals` array (images/audio), converts to OpenAI vision/audio format:
+```javascript
+// Image:
+{ type: 'image_url', image_url: { url: 'data:...' } }
+// Audio:
+{ type: 'input_audio', input_audio: { data: '<base64>', format: 'wav' | 'mp3' } }
+```
+
+Example combined output:
 ```javascript
 [
     { type: 'text', text: '...' },
-    { type: 'image_url', image_url: { url: 'data:...' } }
+    { type: 'image_url', image_url: { url: 'data:image/png;base64,...' } },
+    { type: 'input_audio', input_audio: { data: '...', format: 'mp3' } }
 ]
 ```
 
@@ -369,7 +382,9 @@ const { contents, systemInstruction } = CPM.formatToGemini(messages, {
 // systemInstruction — Array<string>
 ```
 
-Default behavior merges system instructions into the first user message's parts.
+**Default behavior (`preserveSystem: false`):** Merges system instructions into the first user message's parts, then **empties** the `systemInstruction` array (sets `length = 0`). So when using the default, `systemInstruction` will be an empty array.
+
+**With `preserveSystem: true`:** System messages are kept in the `systemInstruction` array and NOT merged into contents.
 
 ---
 
@@ -555,12 +570,16 @@ const apiKey = await CPM.safeGetArg('cpm_myprovider_key');
 const budget = await CPM.safeGetArg('cpm_myprovider_budget', '0');
 ```
 
-### 11.2 `safeGetBoolArg(key)`
+### 11.2 `safeGetBoolArg(key, defaultValue?)`
 
-Reads a boolean argument. Returns `true` only if the stored value is `'true'` or `true`.
+Reads a boolean argument.
+- Returns `true` if value is `'true'` or `true`
+- Returns `false` if value is `'false'`, `false`, or `''`
+- Returns `defaultValue` (default: `false`) for any other value or if key doesn't exist
 
 ```javascript
 const enabled = await CPM.safeGetBoolArg('cpm_myprovider_caching');
+const defaultOn = await CPM.safeGetBoolArg('cpm_myprovider_feature', true);
 ```
 
 ### 11.3 `setArg(key, value)`
@@ -573,7 +592,13 @@ CPM.setArg('cpm_myprovider_model', 'gpt-4o');
 
 ### 11.4 `smartFetch(url, options?)`
 
-Tries direct browser `fetch()` first, falls back to `Risuai.nativeFetch()` on CORS errors:
+Uses a 3-strategy fallback chain to maximize compatibility:
+
+1. **Strategy 1:** Direct browser `fetch()` from iframe (fastest, avoids proxy)
+2. **Strategy 2:** `Risuai.nativeFetch()` via proxy (bypasses CSP, supports streaming)
+3. **Strategy 3:** `Risuai.risuFetch(plainFetchForce)` — direct fetch from HOST window (bypasses proxy region blocks)
+
+For POST requests, the body is automatically deep-sanitized before crossing the V3 bridge to prevent null entries.
 
 ```javascript
 const res = await CPM.smartFetch('https://api.example.com/models', {
@@ -583,10 +608,14 @@ const res = await CPM.smartFetch('https://api.example.com/models', {
 ```
 
 **When to use `smartFetch` vs `Risuai.nativeFetch`:**
-- `smartFetch` — For GET requests to public APIs (model lists, etc.). Avoids proxy issues.
-- `Risuai.nativeFetch` — For POST requests and requests that need CORS bypass. Required for chat completions.
+- `smartFetch` / `smartNativeFetch` — Recommended for all API calls. Handles proxy fallback automatically.
+- `Risuai.nativeFetch` — Direct proxy call only. Use when you explicitly want proxy behavior.
 
-### 11.5 `addCustomModel(modelDef, tag?)`
+### 11.5 `smartNativeFetch(url, options?)`
+
+Alias for `smartFetch`. Explicitly named for streaming use cases where you want to make clear you're expecting a native `Response` object compatible with ReadableStream/SSE.
+
+### 11.6 `addCustomModel(modelDef, tag?)`
 
 Programmatically add a model to CPM's Custom Models Manager:
 
@@ -601,7 +630,7 @@ const result = CPM.addCustomModel({
 // Returns: { success, created, uniqueId, error? }
 ```
 
-### 11.6 `ensureCopilotApiToken()`
+### 11.7 `ensureCopilotApiToken()`
 
 Exchanges a stored GitHub OAuth token for a short-lived Copilot API token (cached):
 
@@ -609,7 +638,7 @@ Exchanges a stored GitHub OAuth token for a short-lived Copilot API token (cache
 const token = await CPM.ensureCopilotApiToken();
 ```
 
-### 11.7 `AwsV4Signer`
+### 11.8 `AwsV4Signer`
 
 AWS Signature Version 4 signer class for AWS Bedrock API authentication. Used by `cpm-provider-aws.js`.
 
@@ -755,7 +784,21 @@ When you update a sub-plugin, you must update **4 things**:
 
 **Why a bundle?** RisuAI's iframe CSP blocks direct `fetch()`. `nativeFetch` goes through proxy2 which caches per-domain (cache poisoning). `risuFetch(plainFetchForce)` works but triggers CORS preflight on raw GitHub. The Vercel API route handles CORS properly, and bundling into one file minimizes requests.
 
-### 13.7 Vercel API Route
+### 13.7 Main Engine (`provider-manager.js`) Updates
+
+The `provider-manager.js` main engine has its own `@update-url` pointing to the Vercel deployment:
+
+```
+//@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
+```
+
+This is separate from the sub-plugin update bundle. RisuAI handles updating the main engine via its native plugin update mechanism (checking `@update-url` + `@version` in the file header). To update the main engine:
+
+1. Update `@version` and `CPM_VERSION` in `provider-manager.js`
+2. Ensure the file is deployed to Vercel (via git push)
+3. RisuAI will detect the new version on next plugin update check
+
+### 13.8 Vercel API Route
 
 The `api/update-bundle.js` serverless function:
 
@@ -789,26 +832,28 @@ module.exports = (req, res) => {
 |---------|-------|----------|
 | Sub-plugin updates not showing | `update-bundle.json` not rebuilt | Rebuild bundle (§13.4) |
 | `CupcakePM API not found!` | Script running before CPM loads | Wrap in `(() => { ... })()` IIFE |
-| `nativeFetch` returns cached data | proxy2 cache poisoning | Use `smartFetch` for GETs, add cache-busters |
+| `nativeFetch` returns cached data | proxy2 cache poisoning | Use `smartFetch` for all API calls |
 | `AbortSignal could not be cloned` | AbortSignal can't cross iframe bridge | Don't pass `abortSignal` to `nativeFetch` |
 | `Invalid service_tier argument` | Sending invalid/empty service_tier | Validate against known values, skip empty |
 | `max_tokens not supported` (newer OpenAI) | Newer models require `max_completion_tokens` | Detect model name, use appropriate param |
 | Null messages in API request | V3 iframe bridge JSON round-trip | Filter messages: `.filter(m => m != null)` |
-| ReadableStream not returned | Bridge doesn't support stream transfer | Use `checkStreamCapability()` + `collectStream()` fallback |
+| No progressive streaming in chat | `handleRequest()` always collects streams to strings | By design — needed for translateLLM cache compatibility (§6.3) |
+| Proxy 403 on Vertex AI / Google Cloud | nativeFetch proxy blocked by region | `smartFetch` auto-falls back to risuFetch (Strategy 3) |
 | `@name` doesn't match versions.json | Name mismatch breaks update detection | Ensure exact string match |
 
 ### Best Practices
 
 1. **Always sanitize messages** — Use `CPM.formatToOpenAI()` etc. instead of passing raw messages
-2. **Use `safeGetArg` / `safeGetBoolArg`** — Never call `risuai.getArgument()` directly (it throws on missing keys)
+2. **Use `safeGetArg` / `safeGetBoolArg`** — Never call `Risuai.getArgument()` directly (it throws on missing keys)
 3. **Prefix setting keys** — Use `cpm_{provider}_` prefix to avoid conflicts (e.g., `cpm_openai_key`)
 4. **Handle errors gracefully** — Return `{ success: false, content: "[Error] ..." }` instead of throwing
 5. **Filter null messages** — Even after formatting, add a final `.filter(m => m != null)` before JSON.stringify
 6. **Don't pass AbortSignal to nativeFetch** — It can't be cloned across the iframe bridge
 7. **Use IIFE wrapper** — Always wrap sub-plugin code in `(() => { ... })()` to avoid polluting global scope
-8. **Test streaming** — Use `CPM.checkStreamCapability()` and fall back to `collectStream()` if needed
+8. **Use `smartFetch` for all API calls** — It handles proxy fallback and body sanitization automatically
 9. **Include dynamic fetch checkbox** — Let users opt-in to server model fetching via `cpm_dynamic_{name}`
 10. **Rebuild the bundle** — After ANY code change, always rebuild `update-bundle.json` before pushing
+11. **Streams are always collected** — Your fetcher can return ReadableStream, but CPM will collect it to a string before returning to RisuAI
 
 ### Version Naming Convention
 

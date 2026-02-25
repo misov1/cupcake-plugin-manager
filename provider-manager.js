@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.10.6
+//@version 1.10.7
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.10.6';
+const CPM_VERSION = '1.10.7';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -1922,7 +1922,7 @@ async function handleRequest(args, activeModelDef, abortSignal) {
             sidebar.className = 'w-full md:w-64 bg-gray-900 border-b md:border-b-0 md:border-r border-gray-700 flex flex-col pt-2 shrink-0 z-50 relative';
             sidebar.innerHTML = `
                     <div class="h-14 flex items-center justify-between px-6 border-b border-gray-700 md:border-none cursor-pointer md:cursor-default" id="cpm-mobile-menu-btn">
-                        <h2 class="text-lg font-extrabold bg-gradient-to-r from-blue-400 to-purple-500 text-transparent bg-clip-text">Cupcake PM v${CPM_VERSION}</h2>
+                        <h2 class="text-lg font-extrabold bg-gradient-to-r from-blue-400 to-purple-500 text-transparent bg-clip-text">🧁 Cupcake PM v${CPM_VERSION}</h2>
                         <span class="md:hidden text-gray-400 text-xl" id="cpm-mobile-icon">▼</span>
                     </div>
                     
@@ -2207,7 +2207,7 @@ async function handleRequest(args, activeModelDef, abortSignal) {
                             // Hot-reload: 즉시 적용 (새로고침 불필요)
                             const installed = SubPluginManager.plugins.find(p => p.name === name);
                             if (installed) await SubPluginManager.hotReload(installed.id);
-                            alert(`서브 플러그인 '${name}' 설치 완료! 즉시 적용되었습니다.`);
+                            alert(`서브 플러그인 '${name}' 설치 완료! 바로 적용되지만 새로고침을 권장합니다.`);
                             renderPluginsTab();
                         };
                         reader.readAsText(file);
@@ -2221,7 +2221,7 @@ async function handleRequest(args, activeModelDef, abortSignal) {
                         await SubPluginManager.toggle(id, e.target.checked);
                         // Hot-reload: 즉시 적용
                         await SubPluginManager.hotReload(id);
-                        alert('설정이 저장 및 즉시 적용되었습니다!');
+                        alert('설정이 저장되었습니다. 바로 적용되지만 새로고침을 권장합니다.');
                     });
                 });
                 listContainer.querySelectorAll('.cpm-plugin-delete').forEach(btn => {
@@ -2283,7 +2283,7 @@ async function handleRequest(args, activeModelDef, abortSignal) {
                                             e.target.textContent = '✅ 완료';
                                             e.target.classList.replace('bg-green-600', 'bg-gray-600');
                                             pendingUpdates.delete(id);
-                                            alert('업데이트 완료! 즉시 적용되었습니다.');
+                                            alert('업데이트 완료! 바로 적용되지만 새로고침을 권장합니다.');
                                         } else {
                                             e.target.textContent = '❌ 실패';
                                         }
@@ -2665,7 +2665,7 @@ async function handleRequest(args, activeModelDef, abortSignal) {
         };
 
         await risuai.registerSetting(
-            `Cupcake PM v${CPM_VERSION}`,
+            `v${CPM_VERSION}`,
             openCpmSettings,
             '🧁',
             'html'
