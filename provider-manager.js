@@ -632,6 +632,8 @@ window.CupcakePM = {
             return await Risuai.nativeFetch(url, options);
         }
     },
+    /** Exchange stored GitHub OAuth token for short-lived Copilot API token (cached). */
+    ensureCopilotApiToken: () => ensureCopilotApiToken(),
 };
 console.log('[CupcakePM] API exposed on window.CupcakePM');
 
@@ -658,7 +660,7 @@ async function inferSlot(activeModelDef) {
 }
 
 function formatToOpenAI(messages, config = {}) {
-    let msgs = [...messages];
+    let msgs = [...messages].filter(m => m != null && typeof m === 'object');
 
     if (config.mergesys) {
         let sysPrompt = "";
@@ -701,8 +703,9 @@ function formatToOpenAI(messages, config = {}) {
 }
 
 function formatToAnthropic(messages, config = {}) {
-    const systemMsgs = messages.filter(m => m.role === 'system');
-    const chatMsgs = messages.filter(m => m.role !== 'system');
+    const validMsgs = messages.filter(m => m != null && typeof m === 'object');
+    const systemMsgs = validMsgs.filter(m => m.role === 'system');
+    const chatMsgs = validMsgs.filter(m => m.role !== 'system');
     const systemPrompt = systemMsgs.map(m => typeof m.content === 'string' ? m.content : JSON.stringify(m.content)).join('\n\n');
 
     const formattedMsgs = [];
@@ -721,7 +724,8 @@ function formatToAnthropic(messages, config = {}) {
     return { messages: formattedMsgs, system: systemPrompt };
 }
 
-function formatToGemini(messages, config = {}) {
+function formatToGemini(messagesRaw, config = {}) {
+    const messages = messagesRaw.filter(m => m != null && typeof m === 'object');
     const systemInstruction = [];
     const contents = [];
     for (const m of messages) {
@@ -983,7 +987,57 @@ async function checkStreamCapability() {
 }
 
 // ==========================================
-// 3.7 PROVIDER FETCHERS (Custom only - built-in providers are sub-plugins)
+// 3.7 COPILOT TOKEN AUTO-FETCH (for githubcopilot.com URLs)
+// ==========================================
+let _copilotTokenCache = { token: '', expiry: 0 };
+
+async function ensureCopilotApiToken() {
+    // Return cached token if still valid (with 60s safety margin)
+    if (_copilotTokenCache.token && Date.now() < _copilotTokenCache.expiry - 60000) {
+        return _copilotTokenCache.token;
+    }
+    // Read GitHub OAuth token from stored arg
+    const githubToken = await safeGetArg('tools_githubCopilotToken');
+    if (!githubToken) {
+        console.warn('[Cupcake PM] Copilot: No GitHub OAuth token found. Set token via Copilot Manager.');
+        return '';
+    }
+    // Sanitize token (strip non-ASCII)
+    const cleanToken = githubToken.replace(/[^\x20-\x7E]/g, '').trim();
+    if (!cleanToken) return '';
+    try {
+        console.log('[Cupcake PM] Copilot: Exchanging OAuth token for API token...');
+        const res = await Risuai.nativeFetch('https://api.github.com/copilot_internal/v2/token', {
+            method: 'GET',
+            headers: {
+                'Accept': 'application/json',
+                'Authorization': `Bearer ${cleanToken}`,
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Code/1.109.2 Chrome/142.0.7444.265 Electron/39.3.0 Safari/537.36',
+            }
+        });
+        if (!res.ok) {
+            console.error(`[Cupcake PM] Copilot token exchange failed (${res.status}): ${await res.text()}`);
+            return '';
+        }
+        const data = await res.json();
+        if (!data.token) {
+            console.error('[Cupcake PM] Copilot token exchange returned no token');
+            return '';
+        }
+        // Cache with expiry (expires_at is Unix timestamp in seconds)
+        const expiryMs = data.expires_at ? data.expires_at * 1000 : Date.now() + 1800000;
+        _copilotTokenCache = { token: data.token, expiry: expiryMs };
+        window._cpmCopilotApiToken = data.token;
+        console.log('[Cupcake PM] Copilot: API token obtained, expires in', Math.round((expiryMs - Date.now()) / 60000), 'min');
+        return data.token;
+    } catch (e) {
+        console.error('[Cupcake PM] Copilot token exchange error:', e.message);
+        return '';
+    }
+}
+
+// ==========================================
+// 3.8 PROVIDER FETCHERS (Custom only - built-in providers are sub-plugins)
 // ==========================================
 
 async function fetchCustom(config, messages, temp, maxTokens, args = {}, abortSignal) {
@@ -1077,11 +1131,22 @@ async function fetchCustom(config, messages, temp, maxTokens, args = {}, abortSi
     }
 
     const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.key}` };
-    if (config.url && config.url.includes('githubcopilot.com') && config.copilotToken) {
+    // Copilot auto-detection: if URL is githubcopilot.com, auto-fetch API token + attach VS Code headers
+    if (config.url && config.url.includes('githubcopilot.com')) {
+        // Auto-fetch Copilot API token (exchanges stored GitHub OAuth token for short-lived API token)
+        let copilotApiToken = config.copilotToken || '';
+        if (!copilotApiToken) {
+            copilotApiToken = await ensureCopilotApiToken();
+        }
+        if (copilotApiToken) {
+            headers['Authorization'] = `Bearer ${copilotApiToken}`;
+        } else {
+            console.warn('[Cupcake PM] Copilot: No API token available. Request may fail auth. Set token via Copilot Manager (🔑 탭).');
+        }
         headers['Copilot-Integration-Id'] = 'vscode-chat';
-        headers['Authorization'] = `Bearer ${config.copilotToken}`;
         headers['Editor-Version'] = 'vscode/1.85.1';
         headers['Editor-Plugin-Version'] = 'copilot-chat/0.11.1';
+        headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Code/1.109.2 Chrome/142.0.7444.265 Electron/39.3.0 Safari/537.36';
     }
 
     // --- Streaming support ---
@@ -1179,7 +1244,7 @@ async function fetchByProviderId(modelDef, args, abortSignal) {
                 reasoning: cDef.reasoning || 'none', verbosity: cDef.verbosity || 'none',
                 thinking_level: cDef.thinking || 'none', tok: cDef.tok || 'o200k_base',
                 decoupled: !!cDef.decoupled, thought: !!cDef.thought,
-                customParams: cDef.customParams || '', copilotToken: args.copilot_token || ''
+                customParams: cDef.customParams || '', copilotToken: ''
             }, messages, temp, maxTokens, args, abortSignal);
         }
         return { success: false, content: `[Cupcake PM] Unknown provider selected: ${modelDef.provider}` };

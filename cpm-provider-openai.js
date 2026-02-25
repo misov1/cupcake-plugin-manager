@@ -72,7 +72,6 @@
                 reasoning: await CPM.safeGetArg('cpm_openai_reasoning'),
                 verbosity: await CPM.safeGetArg('cpm_openai_verbosity'),
                 servicetier: await CPM.safeGetArg('common_openai_servicetier'),
-                copilotToken: args.copilot_token || '',
             };
 
             const url = config.url || 'https://api.openai.com/v1/chat/completions';
@@ -92,11 +91,21 @@
             if (config.verbosity && config.verbosity !== 'none') body.verbosity = config.verbosity;
 
             const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.key}` };
-            if (url.includes('githubcopilot.com') && config.copilotToken) {
+            // Copilot auto-detection: use ensureCopilotApiToken from provider-manager
+            if (url.includes('githubcopilot.com')) {
+                let copilotApiToken = '';
+                if (typeof window.CupcakePM?.ensureCopilotApiToken === 'function') {
+                    copilotApiToken = await window.CupcakePM.ensureCopilotApiToken();
+                } else if (window._cpmCopilotApiToken) {
+                    copilotApiToken = window._cpmCopilotApiToken;
+                }
+                if (copilotApiToken) {
+                    headers['Authorization'] = `Bearer ${copilotApiToken}`;
+                }
                 headers['Copilot-Integration-Id'] = 'vscode-chat';
-                headers['Authorization'] = `Bearer ${config.copilotToken}`;
                 headers['Editor-Version'] = 'vscode/1.85.1';
                 headers['Editor-Plugin-Version'] = 'copilot-chat/0.11.1';
+                headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Code/1.109.2 Chrome/142.0.7444.265 Electron/39.3.0 Safari/537.36';
             }
 
             const res = await Risuai.nativeFetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
