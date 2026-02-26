@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.10.12
+//@version 1.10.13
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.10.12';
+const CPM_VERSION = '1.10.13';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -420,7 +420,10 @@ async function smartNativeFetch(url, options = {}) {
                             if (typeof _rm.role !== 'string' || !_rm.role) continue;
                             if (_rm.content === null || _rm.content === undefined) continue;
                             // Reconstruct with ONLY safe keys — no hidden properties can survive
-                            const safeMsg = { role: _rm.role, content: _rm.content };
+                            // Normalize non-OpenAI roles: model/char → assistant
+                            let _safeRole = _rm.role;
+                            if (_safeRole === 'model' || _safeRole === 'char') _safeRole = 'assistant';
+                            const safeMsg = { role: _safeRole, content: _rm.content };
                             if (_rm.name && typeof _rm.name === 'string') safeMsg.name = _rm.name;
                             bodyObj.messages.push(safeMsg);
                         }
@@ -1031,9 +1034,13 @@ function formatToOpenAI(messages, config = {}) {
         const m = msgs[i];
         if (!m || typeof m !== 'object') continue;
         // Validate role exists and is a string
-        const role = typeof m.role === 'string' ? m.role : 'user';
+        let role = typeof m.role === 'string' ? m.role : 'user';
         if (!role) continue;
+        // Normalize non-OpenAI roles to standard OpenAI roles FIRST
+        // 'model' is Gemini-specific, 'char' is RisuAI-internal → both map to 'assistant'
+        if (role === 'model' || role === 'char') role = 'assistant';
         const msg = { role, content: '' };
+        // altrole: convert assistant→model for Gemini-style APIs (only when explicitly requested)
         if (config.altrole && msg.role === 'assistant') msg.role = 'model';
         // Handle multimodals (images/audio) → OpenAI vision format (like LBI pre31)
         if (m.multimodals && Array.isArray(m.multimodals) && m.multimodals.length > 0) {
@@ -1440,6 +1447,22 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
         systemPrompt = geminiSys.length > 0 ? geminiSys.join('\n\n') : '';
     } else { // Default to OpenAI
         formattedMessages = formatToOpenAI(messages, config);
+    }
+
+    // ── Final role normalization for OpenAI-compatible APIs ──
+    // Even after formatToOpenAI, roles may be non-standard if config.altrole was set
+    // or if RisuAI sent non-standard roles. OpenAI APIs only accept: system, user, assistant, tool, function, developer.
+    // 'model' (Gemini), 'char' (RisuAI internal) → 'assistant'
+    if (format === 'openai' && Array.isArray(formattedMessages)) {
+        const _validOpenAIRoles = new Set(['system', 'user', 'assistant', 'tool', 'function', 'developer']);
+        for (let _ri = 0; _ri < formattedMessages.length; _ri++) {
+            const _fm = formattedMessages[_ri];
+            if (_fm && typeof _fm.role === 'string' && !_validOpenAIRoles.has(_fm.role)) {
+                const _oldRole = _fm.role;
+                _fm.role = (_oldRole === 'model' || _oldRole === 'char') ? 'assistant' : 'user';
+                console.warn(`[Cupcake PM] fetchCustom: normalized invalid OpenAI role '${_oldRole}' → '${_fm.role}' at index ${_ri}`);
+            }
+        }
     }
 
     const body = {
