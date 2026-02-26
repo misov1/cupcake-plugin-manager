@@ -96,7 +96,7 @@
                 }
                 if (!keyJson) keyJson = await CPM.safeGetArg('cpm_vertex_key_json');
                 if (!keyJson) return null;
-                const loc = await CPM.safeGetArg('cpm_vertex_location') || 'us-central1';
+                const loc = await CPM.safeGetArg('cpm_vertex_location') || 'global';
                 const accessToken = await getVertexAccessToken(keyJson);
                 const key = JSON.parse(keyJson);
                 const project = key.project_id;
@@ -186,7 +186,7 @@
                 if (!keyJson) return { success: false, content: '[Vertex] No Service Account JSON key provided.' };
                 let project;
                 try { project = JSON.parse(keyJson).project_id; } catch (e) { return { success: false, content: `[Vertex] JSON 파싱 오류: ${e.message}` }; }
-                const loc = config.location || 'us-central1';
+                const loc = config.location || 'global';
                 const model = config.model || 'gemini-2.5-flash';
                 let accessToken;
                 try { accessToken = await getVertexAccessToken(keyJson); } catch (e) { return { success: false, content: `[Vertex] 토큰 발급 오류: ${e.message}` }; }
