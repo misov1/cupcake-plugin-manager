@@ -1,13 +1,13 @@
 {
     "CPM Provider - Vertex AI": {
-        "version": "1.5.4",
+        "version": "1.5.5",
         "file": "cpm-provider-vertex.js",
-        "changes": ""
+        "changes": "Thought Signature (생각 서명) 지원 추가"
     },
     "CPM Provider - Gemini Studio": {
-        "version": "1.5.3",
+        "version": "1.5.4",
         "file": "cpm-provider-gemini.js",
-        "changes": ""
+        "changes": "Thought Signature (생각 서명) 지원 추가"
     },
     "CPM Provider - Anthropic": {
         "version": "1.6.2",

@@ -1,6 +1,6 @@
 //@name CPM Provider - Gemini Studio
-//@version 1.5.3
-//@description Google Gemini Studio (API Key) provider for Cupcake PM (Streaming, Key Rotation)
+//@version 1.5.4
+//@description Google Gemini Studio (API Key) provider for Cupcake PM (Streaming, Key Rotation, Thought Signature)
 //@icon 🔵
 //@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-gemini.js
 
@@ -74,6 +74,12 @@
                 useThoughtSignature: await CPM.safeGetBoolArg('chat_gemini_useThoughtSignature'),
             };
 
+            // Pre-load thought signature cache for injection into model parts
+            if (config.useThoughtSignature && typeof CPM.loadSignatureCache === 'function') {
+                try { config._signatureCache = await CPM.loadSignatureCache(); }
+                catch { config._signatureCache = {}; }
+            }
+
             const model = config.model || 'gemini-2.5-flash';
             const { contents, systemInstruction } = CPM.formatToGemini(messages, config);
 
@@ -97,7 +103,9 @@
                 const fetchFn = typeof CPM.smartNativeFetch === 'function' ? CPM.smartNativeFetch : Risuai.nativeFetch;
                 const res = await fetchFn(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
                 if (!res.ok) return { success: false, content: `[Gemini Error ${res.status}] ${await res.text()}`, _status: res.status };
-                return { success: true, content: CPM.createSSEStream(res, (line) => CPM.parseGeminiSSELine(line, config), abortSignal) };
+                const _onComplete = config.useThoughtSignature && typeof CPM.saveThoughtSignatureFromStream === 'function'
+                    ? () => CPM.saveThoughtSignatureFromStream(config) : undefined;
+                return { success: true, content: CPM.createSSEStream(res, (line) => CPM.parseGeminiSSELine(line, config), abortSignal, _onComplete) };
             };
 
             // Use key rotation if available, otherwise fall back to single key

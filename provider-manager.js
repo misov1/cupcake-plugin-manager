@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.14.10
+//@version 1.15.0
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.14.10';
+const CPM_VERSION = '1.15.0';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -210,6 +210,102 @@ function sanitizeBodyJSON(jsonStr) {
     } catch (e) {
         console.error('[Cupcake PM] sanitizeBodyJSON: JSON parse/stringify failed:', e.message);
         return jsonStr;
+    }
+}
+
+// ==========================================
+// 3.A THOUGHT SIGNATURE (생각 서명) — Gemini Context Caching
+// ==========================================
+
+/**
+ * DJB2-like hash: same algorithm as LBI's Utils.simpleHash for cache key compatibility.
+ * Returns a string representation of the 32-bit integer hash.
+ */
+function simpleHash(str) {
+    let hash = 0;
+    if (str.length === 0) return hash.toString();
+    for (let i = 0; i < str.length; i++) {
+        const char = str.charCodeAt(i);
+        hash = ((hash << 5) - hash) + char;
+        hash |= 0; // 32bit integer
+    }
+    return hash.toString();
+}
+
+/**
+ * Clean text for signature hash computation:
+ * Strip <Thoughts>, <details>, old LBI signature div tags so the "pure body" is compared.
+ */
+function cleanTextForSignatureHash(text) {
+    let t = text;
+    t = t.replace(/<Thoughts>[\s\S]*?<\/Thoughts>/g, '').trim();
+    t = t.replace(/<details><summary>[\s\S]*?<\/summary>[\s\S]*?<\/details>/g, '').trim();
+    t = t.replace(/<div style="display:none;" data-lbi-thought-signature="[^"]+"><\/div>/g, '').trim();
+    return t;
+}
+
+/**
+ * ThoughtSignatureCache: async read/write for Gemini thought signatures.
+ * Stores in chat.lbi_gemini_cache (LBI-compatible format).
+ * Uses V3 async risuai.getChar() / risuai.setChar() via postMessage bridge.
+ */
+const ThoughtSignatureCache = {
+    /** Save a signature for the given text into the current chat's cache. */
+    async save(text, signature) {
+        try {
+            const char = await risuai.getChar();
+            if (!char) return;
+            const chat = char.chats?.[char.chatPage];
+            if (!chat) return;
+            if (!chat.lbi_gemini_cache) chat.lbi_gemini_cache = {};
+            const hash = simpleHash(text.trim());
+            chat.lbi_gemini_cache[hash] = { signature, timestamp: Date.now() };
+            // Evict oldest entries if cache exceeds 30
+            const keys = Object.keys(chat.lbi_gemini_cache);
+            if (keys.length > 30) {
+                const sorted = keys.sort((a, b) => chat.lbi_gemini_cache[a].timestamp - chat.lbi_gemini_cache[b].timestamp);
+                for (const k of sorted.slice(0, keys.length - 30)) delete chat.lbi_gemini_cache[k];
+            }
+            await risuai.setChar(char);
+            console.log(`[CupcakePM] Saved thought signature (hash: ${hash})`);
+        } catch (e) { console.error('[CupcakePM] Failed to save thought signature:', e); }
+    },
+    /** Retrieve a signature for the given text from the current chat's cache. */
+    async get(text) {
+        try {
+            const char = await risuai.getChar();
+            const chat = char?.chats?.[char.chatPage];
+            if (!chat?.lbi_gemini_cache) return null;
+            const hash = simpleHash(text.trim());
+            const data = chat.lbi_gemini_cache[hash];
+            if (data) {
+                console.log(`[CupcakePM] Found thought signature in cache (hash: ${hash})`);
+                return data.signature;
+            }
+        } catch (e) { console.error('[CupcakePM] Failed to get thought signature:', e); }
+        return null;
+    },
+    /**
+     * Pre-load the entire signature cache map for synchronous lookup in formatToGemini.
+     * Returns a plain object: { [hash]: { signature, timestamp } }
+     */
+    async loadMap() {
+        try {
+            const char = await risuai.getChar();
+            const chat = char?.chats?.[char.chatPage];
+            if (!chat?.lbi_gemini_cache) return {};
+            return { ...chat.lbi_gemini_cache };
+        } catch (e) { console.error('[CupcakePM] Failed to load signature map:', e); return {}; }
+    }
+};
+
+/**
+ * Post-stream helper: read captured signature from config side-channel and save to cache.
+ * Called after streaming completes (via createSSEStream onComplete callback).
+ */
+async function saveThoughtSignatureFromStream(config) {
+    if (config._capturedSignature?.value && config._capturedSignature?.fullText) {
+        await ThoughtSignatureCache.save(config._capturedSignature.fullText, config._capturedSignature.value);
     }
 }
 
@@ -1152,6 +1248,12 @@ window.CupcakePM = {
     parseGeminiSSELine,
     collectStream,
     buildGeminiThinkingConfig,
+    // Thought Signature API (생각 서명 — Gemini Context Caching)
+    ThoughtSignatureCache,
+    loadSignatureCache: () => ThoughtSignatureCache.loadMap(),
+    saveThoughtSignatureFromStream,
+    simpleHash,
+    cleanTextForSignatureHash,
     /** Check if the V3 iframe bridge can transfer ReadableStream. */
     isStreamingAvailable: async () => {
         const enabled = await safeGetBoolArg('cpm_streaming_enabled', false);
@@ -1388,13 +1490,32 @@ function formatToGemini(messagesRaw, config = {}) {
     const messages = sanitizeMessages(messagesRaw);
     const systemInstruction = [];
     const contents = [];
+    const _useSignature = !!(config.useThoughtSignature || config.thought);
+    const _sigCache = (_useSignature && config._signatureCache) ? config._signatureCache : null;
+
     for (const m of messages) {
         if (m.role === 'system') systemInstruction.push(typeof m.content === 'string' ? m.content : JSON.stringify(m.content));
         else {
             const role = m.role === 'assistant' ? 'model' : 'user';
             const text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
-            if (contents.length > 0 && contents[contents.length - 1].role === role) contents[contents.length - 1].parts.push({ text });
-            else contents.push({ role, parts: [{ text }] });
+            const part = { text };
+
+            // Inject thought signature for model-role parts from pre-loaded cache
+            if (role === 'model' && _sigCache) {
+                const cleanedText = cleanTextForSignatureHash(text);
+                const hash = simpleHash(cleanedText);
+                const cached = _sigCache[hash];
+                if (cached) {
+                    part.thought_signature = cached.signature;
+                    console.log(`[CupcakePM] Injecting thought signature for model part (hash: ${hash})`);
+                }
+            }
+
+            if (contents.length > 0 && contents[contents.length - 1].role === role) {
+                contents[contents.length - 1].parts.push(part);
+            } else {
+                contents.push({ role, parts: [part] });
+            }
         }
     }
     if (contents.length > 0 && contents[0].role === 'model') contents.unshift({ role: 'user', parts: [{ text: '(Continue)' }] });
@@ -1422,9 +1543,10 @@ function formatToGemini(messagesRaw, config = {}) {
  * @param {Response} response - fetch Response with streaming body
  * @param {function} lineParser - (line: string) => string|null — extracts delta text from an SSE data line
  * @param {AbortSignal} [abortSignal] - optional abort signal
+ * @param {function} [onComplete] - optional callback invoked when stream finishes reading (for post-stream cleanup like thought signature save)
  * @returns {ReadableStream<string>}
  */
-function createSSEStream(response, lineParser, abortSignal) {
+function createSSEStream(response, lineParser, abortSignal, onComplete) {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
@@ -1435,6 +1557,7 @@ function createSSEStream(response, lineParser, abortSignal) {
                 while (true) {
                     if (abortSignal && abortSignal.aborted) {
                         reader.cancel();
+                        if (typeof onComplete === 'function') try { onComplete(); } catch {}
                         controller.close();
                         return;
                     }
@@ -1445,6 +1568,7 @@ function createSSEStream(response, lineParser, abortSignal) {
                             const delta = lineParser(buffer.trim());
                             if (delta) controller.enqueue(delta);
                         }
+                        if (typeof onComplete === 'function') try { onComplete(); } catch {}
                         controller.close();
                         return;
                     }
@@ -1460,8 +1584,10 @@ function createSSEStream(response, lineParser, abortSignal) {
                 }
             } catch (e) {
                 if (e.name !== 'AbortError') {
+                    if (typeof onComplete === 'function') try { onComplete(); } catch {}
                     controller.error(e);
                 } else {
+                    if (typeof onComplete === 'function') try { onComplete(); } catch {}
                     controller.close();
                 }
             }
@@ -1600,6 +1726,7 @@ function createAnthropicSSEStream(response, abortSignal, config = {}) {
 /**
  * Gemini SSE parser: extracts text parts from streamed JSON chunks.
  * Gemini streamGenerateContent with alt=sse returns "data: {...}" lines.
+ * When useThoughtSignature/thought is enabled, captures signature into config._capturedSignature side-channel.
  */
 function parseGeminiSSELine(line, config = {}) {
     if (!line.startsWith('data:')) return null;
@@ -1607,13 +1734,25 @@ function parseGeminiSSELine(line, config = {}) {
     try {
         const obj = JSON.parse(jsonStr);
         let text = '';
+        const _captureSig = !!(config.useThoughtSignature || config.thought);
         if (obj.candidates?.[0]?.content?.parts) {
             for (const part of obj.candidates[0].content.parts) {
                 if (part.thought && config.showThoughtsToken) text += `\n> [Thought Process]\n> ${part.thought}\n\n`;
                 // thought_signature / thoughtSignature: internal cache key for context caching.
                 // Must NOT be included in output text — it's opaque data for request-side injection only.
-                // (LBI stores this in chat.lbi_gemini_cache and injects it into subsequent API requests.)
-                if (part.text !== undefined && !part.thought) text += part.text;
+                // Capture into config side-channel for post-stream saving.
+                if (_captureSig && (part.thought_signature || part.thoughtSignature)) {
+                    if (!config._capturedSignature) config._capturedSignature = {};
+                    config._capturedSignature.value = part.thought_signature || part.thoughtSignature;
+                }
+                if (part.text !== undefined && !part.thought) {
+                    text += part.text;
+                    // Accumulate full text for hash computation when saving signature
+                    if (_captureSig) {
+                        if (!config._capturedSignature) config._capturedSignature = {};
+                        config._capturedSignature.fullText = (config._capturedSignature.fullText || '') + part.text;
+                    }
+                }
             }
         }
         return text || null;
@@ -1754,6 +1893,15 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
     const format = config.format || 'openai';
     let formattedMessages;
     let systemPrompt = '';
+
+    // Normalize thought signature config key (custom models use 'thought', sub-plugins use 'useThoughtSignature')
+    if (config.thought) config.useThoughtSignature = true;
+
+    // Pre-load thought signature cache for Google format before synchronous formatToGemini
+    if (format === 'google' && config.useThoughtSignature) {
+        try { config._signatureCache = await ThoughtSignatureCache.loadMap(); }
+        catch { config._signatureCache = {}; }
+    }
 
     if (format === 'anthropic') {
         const { messages: anthropicMsgs, system: anthropicSys } = formatToAnthropic(messages, config);
@@ -2020,7 +2168,8 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
             const showThinking = await safeGetBoolArg('cpm_streaming_show_thinking', false);
             return { success: true, content: createAnthropicSSEStream(res, abortSignal, { showThinking }) };
         } else if (format === 'google') {
-            return { success: true, content: createSSEStream(res, (line) => parseGeminiSSELine(line, config), abortSignal) };
+            const _onComplete = config.useThoughtSignature ? () => saveThoughtSignatureFromStream(config) : undefined;
+            return { success: true, content: createSSEStream(res, (line) => parseGeminiSSELine(line, config), abortSignal, _onComplete) };
         } else {
             return { success: true, content: createSSEStream(res, parseOpenAISSELine, abortSignal) };
         }
@@ -2067,8 +2216,19 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
         return { success: true, content: result };
     } else if (format === 'google') {
         let result = '';
+        let extractedSignature = null;
         if (data.candidates?.[0]?.content?.parts) {
-            for (const part of data.candidates[0].content.parts) if (part.text !== undefined && !part.thought) result += part.text;
+            for (const part of data.candidates[0].content.parts) {
+                if (part.text !== undefined && !part.thought) result += part.text;
+                // Extract thought signature from response parts (snake_case + camelCase)
+                if (config.useThoughtSignature && (part.thought_signature || part.thoughtSignature)) {
+                    extractedSignature = part.thought_signature || part.thoughtSignature;
+                }
+            }
+        }
+        // Save extracted signature to cache if present
+        if (extractedSignature && result) {
+            await ThoughtSignatureCache.save(result, extractedSignature);
         }
         return { success: true, content: result };
     } else { // OpenAI compatible
