@@ -1,6 +1,6 @@
 //@name CPM Component - Copilot Token Manager
 //@display-name Cupcake Copilot Manager
-//@version 1.5.3
+//@version 1.5.4
 //@author Cupcake
 //@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-copilot-manager.js
 
@@ -196,7 +196,28 @@
         }
 
         // --- API endpoints (api.github.com, api.githubcopilot.com) ---
-        // Strategy 1: Direct fetch via plainFetchForce (bypasses proxy, uses CORS)
+        // Strategy 1: nativeFetch first (uses RisuAI server proxy on web, native on Tauri)
+        // GitHub Copilot API does NOT support CORS, so browser direct fetch always fails.
+        // nativeFetch goes through the RisuAI proxy server, bypassing CORS entirely.
+        // This matches LBI's approach and works for Docker/local/hosted environments.
+        try {
+            console.debug(LOG_TAG, `nativeFetch for ${url.substring(0, 80)}...`);
+            const res = await Risu.nativeFetch(url, {
+                method,
+                headers,
+                body: body ? JSON.stringify(body) : undefined,
+            });
+            if (res.ok || (res.status && res.status !== 0)) {
+                console.debug(LOG_TAG, `nativeFetch ok=${res.ok}, status=${res.status}`);
+                return res;
+            }
+            console.debug(LOG_TAG, `nativeFetch returned unusable response, trying fallbacks...`);
+        } catch (e) {
+            console.debug(LOG_TAG, 'nativeFetch exception:', e.message);
+        }
+
+        // Strategy 2: Direct fetch via plainFetchForce (bypasses proxy, uses CORS)
+        // Works for api.github.com (which supports CORS), fallback for other endpoints.
         try {
             console.debug(LOG_TAG, `risuFetch [direct] for ${url.substring(0, 80)}...`);
             const result = await Risu.risuFetch(url, {
@@ -219,7 +240,7 @@
             console.debug(LOG_TAG, 'risuFetch [direct] exception:', e.message);
         }
 
-        // Strategy 2: Proxy via plainFetchDeforce (for Tauri/desktop or if CORS fails)
+        // Strategy 3: Proxy via plainFetchDeforce (for Tauri/desktop or if all else fails)
         try {
             console.debug(LOG_TAG, `risuFetch [proxy] for ${url.substring(0, 80)}...`);
             const result = await Risu.risuFetch(url, {
@@ -240,19 +261,6 @@
             console.debug(LOG_TAG, `risuFetch [proxy] not a real HTTP response:`, typeof result.data === 'string' ? result.data.substring(0, 150) : 'unknown');
         } catch (e) {
             console.debug(LOG_TAG, 'risuFetch [proxy] exception:', e.message);
-        }
-
-        // Strategy 3: nativeFetch as last resort (uses proxy on web, native on Tauri)
-        try {
-            console.debug(LOG_TAG, `nativeFetch for ${url.substring(0, 80)}...`);
-            const res = await Risu.nativeFetch(url, {
-                method,
-                headers,
-                body: body ? JSON.stringify(body) : undefined,
-            });
-            return res;
-        } catch (e) {
-            console.debug(LOG_TAG, 'nativeFetch exception:', e.message);
         }
 
         throw new Error('네트워크 요청 실패: 모든 요청 방식이 실패했습니다. RisuAI 데스크탑 앱을 사용하거나, RisuAI 설정 → 기타 봇 설정 → "Use plain fetch instead of server"를 활성화하세요.');

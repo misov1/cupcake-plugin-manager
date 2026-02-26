@@ -40,9 +40,9 @@
         "changes": ""
     },
     "CPM Component - Copilot Token Manager": {
-        "version": "1.5.3",
+        "version": "1.5.4",
         "file": "cpm-copilot-manager.js",
-        "changes": ""
+        "changes": "copilotFetch: nativeFetch를 1순위로 변경 (CORS 미지원 Copilot API 대응, Docker/로컬 환경 호환)"
     },
     "CPM Component - Translation Cache Manager": {
         "version": "1.2.2",
@@ -53,5 +53,10 @@
         "version": "3.0.4",
         "file": "cpm-prompt-toggle-manager.js",
         "changes": "@update-url 추가"
+    },
+    "CPM Component - Chat Navigation": {
+        "version": "2.1.0",
+        "file": "cpm-chat-navigation.js",
+        "changes": "초기 릴리스 (4버튼/2버튼/키보드/OFF 순환)"
     }
 }
