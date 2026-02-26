@@ -24,14 +24,12 @@
                 const key = await CPM.safeGetArg('cpm_gemini_key');
                 if (!key) return null;
 
-                const reverseProxy = await CPM.safeGetArg('cpm_gemini_reverse_proxy');
-                const dynamicBaseUrl = (reverseProxy || 'https://generativelanguage.googleapis.com').replace(/\/+$/, '');
                 let allModels = [];
                 let pageToken = null;
 
                 // Paginate through all available models
                 while (true) {
-                    let url = `${dynamicBaseUrl}/v1beta/models?key=${key}&pageSize=100`;
+                    let url = `https://generativelanguage.googleapis.com/v1beta/models?key=${key}&pageSize=100`;
                     if (pageToken) url += `&pageToken=${encodeURIComponent(pageToken)}`;
 
                     const res = await CPM.smartFetch(url, { method: 'GET' });
@@ -72,13 +70,10 @@
                 preserveSystem: await CPM.safeGetBoolArg('chat_gemini_preserveSystem'),
                 showThoughtsToken: await CPM.safeGetBoolArg('chat_gemini_showThoughtsToken'),
                 useThoughtSignature: await CPM.safeGetBoolArg('chat_gemini_useThoughtSignature'),
-                reverseProxy: await CPM.safeGetArg('cpm_gemini_reverse_proxy'),
             };
 
             const model = config.model || 'gemini-2.5-flash';
-            // Support custom reverse proxy URL for regions where generativelanguage.googleapis.com is blocked
-            const baseUrl = (config.reverseProxy || 'https://generativelanguage.googleapis.com').replace(/\/+$/, '');
-            const url = `${baseUrl}/v1beta/models/${model}:streamGenerateContent?key=${config.key}&alt=sse`;
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?key=${config.key}&alt=sse`;
             const { contents, systemInstruction } = CPM.formatToGemini(messages, config);
 
             const body = { contents, generationConfig: { temperature: temp, maxOutputTokens: maxTokens } };
@@ -98,12 +93,11 @@
             id: 'tab-gemini',
             icon: '🔵',
             label: 'Gemini Studio',
-            exportKeys: ['cpm_gemini_key', 'cpm_gemini_reverse_proxy', 'cpm_gemini_thinking_level', 'chat_gemini_preserveSystem', 'chat_gemini_showThoughtsToken', 'chat_gemini_useThoughtSignature', 'chat_gemini_usePlainFetch', 'cpm_dynamic_googleai'],
+            exportKeys: ['cpm_gemini_key', 'cpm_gemini_thinking_level', 'chat_gemini_preserveSystem', 'chat_gemini_showThoughtsToken', 'chat_gemini_useThoughtSignature', 'chat_gemini_usePlainFetch', 'cpm_dynamic_googleai'],
             renderContent: async (renderInput, lists) => {
                 return `
                     <h3 class="text-3xl font-bold text-indigo-400 mb-6 pb-3 border-b border-gray-700">Gemini Studio Configuration (설정)</h3>
                     ${await renderInput('cpm_gemini_key', 'API Key (API 키)', 'password')}
-                    ${await renderInput('cpm_gemini_reverse_proxy', 'Reverse Proxy URL (리버스 프록시 주소 - 지역 제한 우회용, 선택사항)')}
                     ${await renderInput('cpm_dynamic_googleai', '📡 서버에서 모델 목록 불러오기 (Fetch models from API)', 'checkbox')}
                     ${await renderInput('cpm_gemini_thinking_level', 'Thinking Level (생각 수준)', 'select', lists.thinkingList)}
                     ${await renderInput('chat_gemini_preserveSystem', 'Preserve System (시스템 프롬프트 보존)', 'checkbox')}
