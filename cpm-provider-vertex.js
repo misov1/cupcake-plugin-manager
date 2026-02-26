@@ -1,6 +1,6 @@
 // @name CPM Provider - Vertex AI
-// @version 1.4.0
-// @description Google Vertex AI (Service Account) provider for Cupcake PM (Streaming)
+// @version 1.5.0
+// @description Google Vertex AI (Service Account) provider for Cupcake PM (Streaming, Key Rotation)
 // @icon 🔷
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-vertex.js
 
@@ -37,12 +37,15 @@
     }));
 
     // Vertex OAuth token helper (uses Service Account JSON key)
+    // Per-credential token cache (keyed by client_email) for multi-key rotation
+    const _tokenCaches = {};
+
     async function getVertexAccessToken(keyJson) {
-        const cache = CPM.vertexTokenCache || { token: null, expiry: 0 };
+        const key = JSON.parse(keyJson);
+        const cacheKey = key.client_email || 'default';
+        const cache = _tokenCaches[cacheKey] || { token: null, expiry: 0 };
         const now = Math.floor(Date.now() / 1000);
         if (cache.token && cache.expiry > now + 60) return cache.token;
-
-        const key = JSON.parse(keyJson);
         const header = btoa(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).replace(/=+$/, '');
         const claims = btoa(JSON.stringify({
             iss: key.client_email,
@@ -66,8 +69,16 @@
         });
         if (!res.ok) throw new Error(await res.text());
         const data = await res.json();
-        CPM.vertexTokenCache = { token: data.access_token, expiry: now + data.expires_in };
+        _tokenCaches[cacheKey] = { token: data.access_token, expiry: now + data.expires_in };
         return data.access_token;
+    }
+
+    function invalidateTokenCache(keyJson) {
+        try {
+            const key = JSON.parse(keyJson);
+            const cacheKey = key.client_email || 'default';
+            delete _tokenCaches[cacheKey];
+        } catch (_) {}
     }
 
     CPM.registerProvider({
@@ -75,7 +86,12 @@
         models,
         fetchDynamicModels: async () => {
             try {
-                const keyJson = await CPM.safeGetArg('cpm_vertex_key_json');
+                // Use pickJsonKey for key rotation support
+                let keyJson;
+                if (typeof CPM.pickJsonKey === 'function') {
+                    keyJson = await CPM.pickJsonKey('cpm_vertex_key_json');
+                }
+                if (!keyJson) keyJson = await CPM.safeGetArg('cpm_vertex_key_json');
                 if (!keyJson) return null;
                 const loc = await CPM.safeGetArg('cpm_vertex_location') || 'us-central1';
                 const accessToken = await getVertexAccessToken(keyJson);
@@ -152,7 +168,6 @@
         },
         fetcher: async function (modelDef, messages, temp, maxTokens, args, abortSignal) {
             const config = {
-                keyJson: await CPM.safeGetArg('cpm_vertex_key_json'),
                 location: await CPM.safeGetArg('cpm_vertex_location'),
                 model: modelDef.id,
                 thinking: await CPM.safeGetArg('cpm_vertex_thinking_level'),
@@ -163,37 +178,70 @@
                 useThoughtSignature: await CPM.safeGetBoolArg('chat_vertex_useThoughtSignature'),
             };
 
-            if (!config.keyJson) return { success: false, content: '[Vertex] No Service Account JSON key provided.' };
-            const project = JSON.parse(config.keyJson).project_id;
-            const loc = config.location || 'us-central1';
-            const model = config.model || 'gemini-2.5-flash';
-            const accessToken = await getVertexAccessToken(config.keyJson);
-            const baseUrl = loc === 'global' ? 'https://aiplatform.googleapis.com' : `https://${loc}-aiplatform.googleapis.com`;
-            const isClaude = model.startsWith('claude-');
-            const fetchFn = typeof CPM.smartNativeFetch === 'function' ? CPM.smartNativeFetch : Risuai.nativeFetch;
+            // Key Rotation: wrap all fetch logic in doFetch(keyJson) for automatic credential rotation
+            const doFetch = async (keyJson) => {
+                if (!keyJson) return { success: false, content: '[Vertex] No Service Account JSON key provided.' };
+                let project;
+                try { project = JSON.parse(keyJson).project_id; } catch (e) { return { success: false, content: `[Vertex] JSON 파싱 오류: ${e.message}` }; }
+                const loc = config.location || 'us-central1';
+                const model = config.model || 'gemini-2.5-flash';
+                let accessToken;
+                try { accessToken = await getVertexAccessToken(keyJson); } catch (e) { return { success: false, content: `[Vertex] 토큰 발급 오류: ${e.message}` }; }
+                const baseUrl = loc === 'global' ? 'https://aiplatform.googleapis.com' : `https://${loc}-aiplatform.googleapis.com`;
+                const isClaude = model.startsWith('claude-');
+                const fetchFn = typeof CPM.smartNativeFetch === 'function' ? CPM.smartNativeFetch : Risuai.nativeFetch;
 
-            if (isClaude) {
-                // ── Claude on Vertex (Model Garden) ── streamRawPredict ──
-                const url = `${baseUrl}/v1beta1/projects/${project}/locations/${loc}/publishers/anthropic/models/${model}:streamRawPredict`;
-                const { messages: formattedMsgs, system: systemPrompt } = CPM.formatToAnthropic(messages, config);
-                const body = {
-                    anthropic_version: 'vertex-2023-10-16',
-                    model: model,
-                    max_tokens: maxTokens,
-                    temperature: temp,
-                    messages: formattedMsgs,
-                    stream: true,
-                };
-                if (args.top_p !== undefined && args.top_p !== null) body.top_p = args.top_p;
-                if (args.top_k !== undefined && args.top_k !== null) body.top_k = args.top_k;
-                if (systemPrompt) body.system = systemPrompt;
+                if (isClaude) {
+                    // ── Claude on Vertex (Model Garden) ── streamRawPredict ──
+                    const url = `${baseUrl}/v1beta1/projects/${project}/locations/${loc}/publishers/anthropic/models/${model}:streamRawPredict`;
+                    const { messages: formattedMsgs, system: systemPrompt } = CPM.formatToAnthropic(messages, config);
+                    const body = {
+                        anthropic_version: 'vertex-2023-10-16',
+                        model: model,
+                        max_tokens: maxTokens,
+                        temperature: temp,
+                        messages: formattedMsgs,
+                        stream: true,
+                    };
+                    if (args.top_p !== undefined && args.top_p !== null) body.top_p = args.top_p;
+                    if (args.top_k !== undefined && args.top_k !== null) body.top_k = args.top_k;
+                    if (systemPrompt) body.system = systemPrompt;
 
-                // Extended thinking support (budget-based)
-                const budget = parseInt(config.claudeThinkingBudget) || 0;
-                if (budget > 0) {
-                    body.thinking = { type: 'enabled', budget_tokens: budget };
-                    if (body.max_tokens <= budget) body.max_tokens = budget + 4096;
-                    delete body.temperature; // temperature not allowed with thinking
+                    // Extended thinking support (budget-based)
+                    const budget = parseInt(config.claudeThinkingBudget) || 0;
+                    if (budget > 0) {
+                        body.thinking = { type: 'enabled', budget_tokens: budget };
+                        if (body.max_tokens <= budget) body.max_tokens = budget + 4096;
+                        delete body.temperature;
+                    }
+
+                    const res = await fetchFn(url, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` },
+                        body: JSON.stringify(body)
+                    });
+                    if (!res.ok) {
+                        if (res.status === 401 || res.status === 403) invalidateTokenCache(keyJson);
+                        return { success: false, content: `[Vertex Claude Error ${res.status}] ${await res.text()}`, _status: res.status };
+                    }
+                    return { success: true, content: CPM.createAnthropicSSEStream(res, abortSignal) };
+                }
+
+                // ── Gemini models ── streamGenerateContent ──
+                const url = `${baseUrl}/v1beta1/projects/${project}/locations/${loc}/publishers/google/models/${model}:streamGenerateContent?alt=sse`;
+
+                const { contents, systemInstruction: sys } = CPM.formatToGemini(messages, config);
+                const body = { contents, generationConfig: { temperature: temp, maxOutputTokens: maxTokens } };
+                if (args.top_p !== undefined && args.top_p !== null) body.generationConfig.topP = args.top_p;
+                if (args.top_k !== undefined && args.top_k !== null) body.generationConfig.topK = args.top_k;
+                if (args.frequency_penalty !== undefined && args.frequency_penalty !== null) body.generationConfig.frequencyPenalty = args.frequency_penalty;
+                if (args.presence_penalty !== undefined && args.presence_penalty !== null) body.generationConfig.presencePenalty = args.presence_penalty;
+                if (sys.length > 0) body.systemInstruction = { parts: sys.map(text => ({ text })) };
+                if (typeof CPM.buildGeminiThinkingConfig === 'function') {
+                    const _tc = CPM.buildGeminiThinkingConfig(model, config.thinking, config.thinkingBudget);
+                    if (_tc) body.generationConfig.thinkingConfig = _tc;
+                } else if (config.thinking && config.thinking !== 'off' && config.thinking !== 'none') {
+                    body.generationConfig.thinkingConfig = { thinkMode: config.thinking };
                 }
 
                 const res = await fetchFn(url, {
@@ -202,40 +250,18 @@
                     body: JSON.stringify(body)
                 });
                 if (!res.ok) {
-                    if (res.status === 401 || res.status === 403) CPM.vertexTokenCache = { token: null, expiry: 0 };
-                    return { success: false, content: `[Vertex Claude Error ${res.status}] ${await res.text()}` };
+                    if (res.status === 401 || res.status === 403) invalidateTokenCache(keyJson);
+                    return { success: false, content: `[Vertex Error ${res.status}] ${await res.text()}`, _status: res.status };
                 }
-                return { success: true, content: CPM.createAnthropicSSEStream(res, abortSignal) };
-            }
+                return { success: true, content: CPM.createSSEStream(res, (line) => CPM.parseGeminiSSELine(line, config), abortSignal) };
+            };
 
-            // ── Gemini models ── streamGenerateContent ──
-            const url = `${baseUrl}/v1beta1/projects/${project}/locations/${loc}/publishers/google/models/${model}:streamGenerateContent?alt=sse`;
-
-            const { contents, systemInstruction: sys } = CPM.formatToGemini(messages, config);
-            const body = { contents, generationConfig: { temperature: temp, maxOutputTokens: maxTokens } };
-            if (args.top_p !== undefined && args.top_p !== null) body.generationConfig.topP = args.top_p;
-            if (args.top_k !== undefined && args.top_k !== null) body.generationConfig.topK = args.top_k;
-            if (args.frequency_penalty !== undefined && args.frequency_penalty !== null) body.generationConfig.frequencyPenalty = args.frequency_penalty;
-            if (args.presence_penalty !== undefined && args.presence_penalty !== null) body.generationConfig.presencePenalty = args.presence_penalty;
-            if (sys.length > 0) body.systemInstruction = { parts: sys.map(text => ({ text })) };
-            // Gemini 3: thinkMode (level string), Gemini 2.5: thinkingBudget (number)
-            if (typeof CPM.buildGeminiThinkingConfig === 'function') {
-                const _tc = CPM.buildGeminiThinkingConfig(model, config.thinking, config.thinkingBudget);
-                if (_tc) body.generationConfig.thinkingConfig = _tc;
-            } else if (config.thinking && config.thinking !== 'off' && config.thinking !== 'none') {
-                body.generationConfig.thinkingConfig = { thinkMode: config.thinking };
+            // Use JSON key rotation if available, otherwise fall back to single key
+            if (typeof CPM.withJsonKeyRotation === 'function') {
+                return CPM.withJsonKeyRotation('cpm_vertex_key_json', doFetch);
             }
-
-            const res = await fetchFn(url, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` },
-                body: JSON.stringify(body)
-            });
-            if (!res.ok) {
-                if (res.status === 401 || res.status === 403) CPM.vertexTokenCache = { token: null, expiry: 0 };
-                return { success: false, content: await res.text() };
-            }
-            return { success: true, content: CPM.createSSEStream(res, (line) => CPM.parseGeminiSSELine(line, config), abortSignal) };
+            const fallbackKey = await CPM.safeGetArg('cpm_vertex_key_json');
+            return doFetch(fallbackKey);
         },
         settingsTab: {
             id: 'tab-vertex',
@@ -245,7 +271,7 @@
             renderContent: async (renderInput, lists) => {
                 return `
                     <h3 class="text-3xl font-bold text-blue-400 mb-6 pb-3 border-b border-gray-700">Vertex AI Configuration (설정)</h3>
-                    ${await renderInput('cpm_vertex_key_json', 'Service Account JSON Key Code (서비스 계정 JSON 키)', 'textarea')}
+                    ${await renderInput('cpm_vertex_key_json', 'Service Account JSON Key (JSON 키 - 여러 개 입력 시 쉼표로 구분, 자동 키회전)', 'textarea')}
                     ${await renderInput('cpm_vertex_location', 'Location Endpoint (리전 엔드포인트 ex: global, us-central1)')}
                     ${await renderInput('cpm_dynamic_vertexai', '📡 서버에서 모델 목록 불러오기 (Fetch models from API)', 'checkbox')}
                     ${await renderInput('cpm_vertex_thinking_level', 'Thinking Level (생각 수준 - Gemini 3용)', 'select', lists.thinkingList)}

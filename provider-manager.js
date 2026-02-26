@@ -1014,6 +1014,86 @@ const KeyPool = {
             }
         }
         return { success: false, content: `[KeyPool] 최대 재시도 횟수(${maxRetries})를 초과했습니다.` };
+    },
+
+    // ── JSON Credential Rotation (Vertex AI 등 JSON 크레덴셜용) ──
+
+    /**
+     * Extract individual JSON objects from a raw textarea string.
+     * Supports: single object, comma-separated objects ({...},{...}),
+     *           JSON array ([{...},{...}]), newline-separated objects.
+     */
+    _parseJsonCredentials(raw) {
+        const trimmed = (raw || '').trim();
+        if (!trimmed) return [];
+        // 1. Try as JSON array: [{...}, {...}]
+        try {
+            const arr = JSON.parse(trimmed);
+            if (Array.isArray(arr)) return arr.filter(o => o && typeof o === 'object').map(o => JSON.stringify(o));
+        } catch (_) {}
+        // 2. Try wrapping in brackets: {...},{...} → [{...},{...}]
+        if (trimmed.startsWith('{')) {
+            try {
+                const arr = JSON.parse('[' + trimmed + ']');
+                if (Array.isArray(arr)) return arr.filter(o => o && typeof o === 'object').map(o => JSON.stringify(o));
+            } catch (_) {}
+        }
+        // 3. Try as single JSON object
+        try {
+            const obj = JSON.parse(trimmed);
+            if (obj && typeof obj === 'object' && !Array.isArray(obj)) return [trimmed];
+        } catch (_) {}
+        return [];
+    },
+
+    /**
+     * Parse JSON credentials from a textarea field, cache them,
+     * and return a random one from the pool.
+     */
+    async pickJson(argName) {
+        const raw = await safeGetArg(argName);
+        const pool = this._pools[argName];
+        if (!pool || pool.lastRaw !== raw || pool.keys.length === 0) {
+            const jsons = this._parseJsonCredentials(raw);
+            this._pools[argName] = { lastRaw: raw, keys: jsons };
+        }
+        const keys = this._pools[argName].keys;
+        if (keys.length === 0) return '';
+        return keys[Math.floor(Math.random() * keys.length)];
+    },
+
+    /**
+     * All-in-one wrapper for JSON credential rotation.
+     * Like withRotation but uses pickJson for credential parsing.
+     *
+     * fetchFn(credentialJson) should return { success, content, _status? }
+     */
+    async withJsonRotation(argName, fetchFn, opts = {}) {
+        const maxRetries = opts.maxRetries || 30;
+        const isRetryable = opts.isRetryable || ((result) => {
+            if (!result._status) return false;
+            return result._status === 429 || result._status === 529 || result._status === 503;
+        });
+
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+            const credJson = await this.pickJson(argName);
+            if (!credJson) {
+                return { success: false, content: `[KeyPool] ${argName}에 사용 가능한 JSON 인증 정보가 없습니다. 설정에서 확인하세요.` };
+            }
+
+            const result = await fetchFn(credJson);
+            if (result.success || !isRetryable(result)) return result;
+
+            const remaining = this.drain(argName, credJson);
+            console.warn(`[KeyPool] \u{1F504} JSON 인증 교체: ${argName} (HTTP ${result._status}, 남은 인증: ${remaining}개, 시도: ${attempt + 1})`);
+
+            if (remaining === 0) {
+                console.warn(`[KeyPool] \u{26A0}\u{FE0F} ${argName}의 모든 JSON 인증이 소진되었습니다.`);
+                this.reset(argName);
+                return result;
+            }
+        }
+        return { success: false, content: `[KeyPool] 최대 재시도 횟수(${maxRetries})를 초과했습니다.` };
     }
 };
 console.log('[CupcakePM] KeyPool (key rotation) initialized.');
@@ -1063,6 +1143,9 @@ window.CupcakePM = {
     keyPoolRemaining: (argName) => KeyPool.remaining(argName),
     resetKeyPool: (argName) => KeyPool.reset(argName),
     withKeyRotation: (argName, fetchFn, opts) => KeyPool.withRotation(argName, fetchFn, opts),
+    // JSON Credential Rotation API (Vertex 등 JSON 크레덴셜 키회전)
+    pickJsonKey: (argName) => KeyPool.pickJson(argName),
+    withJsonKeyRotation: (argName, fetchFn, opts) => KeyPool.withJsonRotation(argName, fetchFn, opts),
     get vertexTokenCache() { return vertexTokenCache; },
     set vertexTokenCache(v) { vertexTokenCache = v; },
     AwsV4Signer,
