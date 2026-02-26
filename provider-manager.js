@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.13.1
+//@version 1.14.1
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.13.1';
+const CPM_VERSION = '1.14.1';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -112,6 +112,9 @@ let vertexTokenCache = { token: null, expiry: 0 };
 const pendingDynamicFetchers = [];
 let _currentExecutingPluginId = null;
 const _pluginRegistrations = {}; // pluginId -> { providerNames: [], tabObjects: [], fetcherEntries: [] }
+
+// Last Custom Model API request/response (for API View feature)
+let _lastCustomApiRequest = null; // { timestamp, modelName, url, method, headers, body, response, status, duration }
 
 // Helper: Check if dynamic model fetching is enabled for a given provider
 // Setting key: cpm_dynamic_<providerName_lowercase> = 'true' means fetch from server
@@ -1064,9 +1067,9 @@ function buildGeminiThinkingConfig(model, level, budget) {
     const budgetNum = parseInt(budget) || 0;
 
     if (isGemini3) {
-        // Gemini 3+: thinking mode/level (thinkMode)
+        // Gemini 3+: thinking mode/level (thinkingMode)
         if (level && level !== 'off' && level !== 'none') {
-            return { thinkMode: level };
+            return { thinkingMode: level };
         }
         return null;
     }
@@ -1567,6 +1570,13 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
         formattedMessages = formatToOpenAI(messages, config);
     }
 
+    // --- Key Rotation support for Custom Models ---
+    // Parse multiple keys from config.key (whitespace-separated)
+    const _rawKeys = (config.key || '').trim();
+    const _allKeys = _rawKeys.split(/\s+/).filter(k => k.length > 0);
+    const _useKeyRotation = _allKeys.length > 1;
+    let _keyPool = [..._allKeys]; // mutable copy for rotation draining
+
     // Final role normalization for OpenAI-compatible APIs
     if (format === 'openai' && Array.isArray(formattedMessages)) {
         const _validOpenAIRoles = new Set(['system', 'user', 'assistant', 'tool', 'function', 'developer']);
@@ -1715,7 +1725,10 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
         }
     }
 
-    const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.key}` };
+    // --- Wrap core fetch logic to support key rotation ---
+    const _doCustomFetch = async (_apiKey) => {
+
+    const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${_apiKey}` };
     // Copilot auto-detection: if URL is githubcopilot.com, auto-fetch API token + attach Copilot headers
     if (effectiveUrl && effectiveUrl.includes('githubcopilot.com')) {
         // Auto-fetch Copilot API token (exchanges stored GitHub OAuth token for short-lived API token)
@@ -1750,6 +1763,9 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
     // --- Streaming support ---
     const useStreaming = !config.decoupled;
 
+    // Capture API request info for API View feature
+    const _captureStartTime = Date.now();
+
     if (useStreaming) {
         // Build streaming request
         const streamBody = { ...body };
@@ -1769,6 +1785,17 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
         // Use safeStringify → sanitizeBodyJSON for final safety
         const finalBody = sanitizeBodyJSON(safeStringify(streamBody));
 
+        // Capture last API request for API View
+        _lastCustomApiRequest = {
+            timestamp: new Date().toISOString(),
+            modelName: config.model || '(unknown)',
+            url: streamUrl,
+            method: 'POST',
+            headers: { ...headers, 'Authorization': headers['Authorization'] ? '***REDACTED***' : undefined },
+            body: (() => { try { return JSON.parse(finalBody); } catch { return finalBody; } })(),
+            response: null, status: null, duration: null
+        };
+
         const res = await smartNativeFetch(streamUrl, {
             method: 'POST',
             headers,
@@ -1776,11 +1803,17 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
             // NOTE: signal: abortSignal removed — AbortSignal can't cross V3 iframe bridge (postMessage structured clone)
         });
 
+        _lastCustomApiRequest.duration = Date.now() - _captureStartTime;
+        _lastCustomApiRequest.status = res.status;
+
         if (!res.ok) {
             const errBody = await res.text();
+            _lastCustomApiRequest.response = errBody.substring(0, 2000);
             console.error(`[Cupcake PM] Streaming request failed (${res.status}) for ${streamUrl.substring(0, 60)}:`, errBody.substring(0, 500));
-            return { success: false, content: `[Custom API Error ${res.status}] ${errBody}` };
+            return { success: false, content: `[Custom API Error ${res.status}] ${errBody}`, _status: res.status };
         }
+
+        _lastCustomApiRequest.response = '(streaming — response body not captured)';
 
         if (format === 'anthropic') {
             const showThinking = await safeGetBoolArg('cpm_streaming_show_thinking', false);
@@ -1793,19 +1826,37 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
     }
 
     // --- Non-streaming (decoupled) fallback ---
+    const _nonStreamBody = sanitizeBodyJSON(safeStringify(body));
+
+    // Capture last API request for API View
+    _lastCustomApiRequest = {
+        timestamp: new Date().toISOString(),
+        modelName: config.model || '(unknown)',
+        url: effectiveUrl,
+        method: 'POST',
+        headers: { ...headers, 'Authorization': headers['Authorization'] ? '***REDACTED***' : undefined },
+        body: (() => { try { return JSON.parse(_nonStreamBody); } catch { return _nonStreamBody; } })(),
+        response: null, status: null, duration: null
+    };
+
     const res = await smartNativeFetch(effectiveUrl, {
         method: 'POST',
         headers,
-        body: sanitizeBodyJSON(safeStringify(body))
+        body: _nonStreamBody
         // NOTE: signal: abortSignal removed — AbortSignal can't cross V3 iframe bridge (postMessage structured clone)
     });
 
+    _lastCustomApiRequest.duration = Date.now() - _captureStartTime;
+    _lastCustomApiRequest.status = res.status;
+
     if (!res.ok) {
         const errBody = await res.text();
+        _lastCustomApiRequest.response = errBody.substring(0, 2000);
         console.error(`[Cupcake PM] Non-streaming request failed (${res.status}) for ${effectiveUrl.substring(0, 60)}:`, errBody.substring(0, 500));
-        return { success: false, content: `[Custom API Error ${res.status}] ${errBody}` };
+        return { success: false, content: `[Custom API Error ${res.status}] ${errBody}`, _status: res.status };
     }
     const data = await res.json();
+    _lastCustomApiRequest.response = data;
 
     if (format === 'anthropic') {
         let result = '';
@@ -1822,6 +1873,21 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
     } else { // OpenAI compatible
         return { success: true, content: data.choices?.[0]?.message?.content || '' };
     }
+    }; // end _doCustomFetch
+
+    // --- Key Rotation dispatch ---
+    if (_useKeyRotation) {
+        // Create a temporary KeyPool argName for this custom model's keys
+        const _rotationPoolName = `_cpm_custom_inline_${config.model || 'unknown'}`;
+        // Seed the pool manually (custom models store keys inline, not in @arg fields)
+        KeyPool._pools[_rotationPoolName] = {
+            lastRaw: _rawKeys,
+            keys: [..._keyPool]
+        };
+        return KeyPool.withRotation(_rotationPoolName, _doCustomFetch);
+    }
+    // Single key — call directly
+    return _doCustomFetch(_allKeys[0] || '');
 }
 
 
@@ -2331,8 +2397,20 @@ async function handleRequest(args, activeModelDef, abortSignal) {
                         <div class="flex justify-between items-center mb-6 pb-3 border-b border-gray-700">
                             <h3 class="text-3xl font-bold text-gray-400">Custom Models Manager</h3>
                             <div class="flex space-x-2">
+                                <button id="cpm-api-view-btn" class="bg-purple-700 hover:bg-purple-600 text-white font-semibold py-2 px-4 rounded transition-colors text-sm shadow">📡 API 보기</button>
                                 <button id="cpm-import-model-btn" class="bg-green-700 hover:bg-green-600 text-white font-semibold py-2 px-4 rounded transition-colors text-sm shadow">📥 Import Model</button>
                                 <button id="cpm-add-custom-btn" class="bg-blue-600 hover:bg-blue-500 text-white font-semibold py-2 px-4 rounded transition-colors text-sm shadow">➕ Add Model</button>
+                            </div>
+                        </div>
+                        
+                        <!-- API View Panel -->
+                        <div id="cpm-api-view-panel" class="hidden mb-6 bg-gray-900 border border-purple-700/50 rounded-lg p-5">
+                            <div class="flex justify-between items-center mb-4">
+                                <h4 class="text-lg font-bold text-purple-400">📡 마지막 API 요청 보기</h4>
+                                <button id="cpm-api-view-close" class="text-gray-400 hover:text-white text-lg px-2">✕</button>
+                            </div>
+                            <div id="cpm-api-view-content" class="text-sm text-gray-300">
+                                <div class="text-center text-gray-500 py-4">아직 커스텀 모델로 API 요청을 보낸 적이 없습니다. 채팅을 시도한 후 다시 확인하세요.</div>
                             </div>
                         </div>
                         
@@ -2361,8 +2439,9 @@ async function handleRequest(args, activeModelDef, abortSignal) {
                                     <input type="text" id="cpm-cm-url" class="w-full bg-gray-800 border border-gray-600 rounded px-3 py-2 text-white">
                                 </div>
                                 <div class="md:col-span-2">
-                                    <label class="block text-sm font-medium text-gray-400 mb-1">API Key</label>
-                                    <input type="password" id="cpm-cm-key" class="w-full bg-gray-800 border border-gray-600 rounded px-3 py-2 text-white">
+                                    <label class="block text-sm font-medium text-gray-400 mb-1">API Key (여러 개 입력 시 공백/줄바꿈으로 구분 → 자동 키회전)</label>
+                                    <textarea id="cpm-cm-key" rows="2" class="w-full bg-gray-800 border border-gray-600 rounded px-3 py-2 text-white font-mono text-sm focus:outline-none focus:border-blue-500" spellcheck="false" placeholder="sk-xxxx 또는 여러 키를 공백/줄바꿈으로 구분 입력"></textarea>
+                                    <p class="text-xs text-gray-500 mt-1">🔄 키를 2개 이상 입력하면 자동으로 키회전이 활성화됩니다. (429/529/503 에러 시 다음 키로 자동 전환)</p>
                                 </div>
                                 
                                 <div class="md:col-span-2 mt-4 border-t border-gray-800 pt-4">
@@ -2765,7 +2844,7 @@ async function handleRequest(args, activeModelDef, abortSignal) {
                 cmList.innerHTML = CUSTOM_MODELS_CACHE.map((m, i) => `
                     <div class="bg-gray-800 border border-gray-700 rounded p-4 flex justify-between items-center group hover:border-gray-500 transition-colors">
                         <div>
-                            <div class="font-bold text-white text-lg">${m.name || 'Unnamed Model'}</div>
+                            <div class="font-bold text-white text-lg">${m.name || 'Unnamed Model'}${((m.key || '').trim().split(/\s+/).filter(k => k.length > 0).length > 1) ? ' <span class=\"text-xs text-blue-400 font-normal ml-2\">🔄 키회전</span>' : ''}</div>
                             <div class="text-xs text-gray-400 font-mono mt-1">${m.model || 'No model ID'} | ${m.url || 'No URL'}</div>
                         </div>
                         <div class="flex space-x-2 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -2943,6 +3022,64 @@ async function handleRequest(args, activeModelDef, abortSignal) {
                 SettingsBackup.updateKey('cpm_custom_models', JSON.stringify(CUSTOM_MODELS_CACHE));
                 refreshCmList();
                 cmEditor.classList.add('hidden');
+            });
+
+            // API View button handler
+            document.getElementById('cpm-api-view-btn').addEventListener('click', () => {
+                const panel = document.getElementById('cpm-api-view-panel');
+                const content = document.getElementById('cpm-api-view-content');
+                if (!panel.classList.contains('hidden')) {
+                    panel.classList.add('hidden');
+                    return;
+                }
+                if (!_lastCustomApiRequest) {
+                    content.innerHTML = '<div class="text-gray-500 text-center py-8">아직 커스텀 모델 API 요청 기록이 없습니다.<br><span class="text-xs">커스텀 모델로 채팅을 보내면 여기에 마지막 요청 정보가 표시됩니다.</span></div>';
+                } else {
+                    const r = _lastCustomApiRequest;
+                    const redactKey = (v) => {
+                        if (!v || typeof v !== 'string') return v;
+                        if (v.length <= 8) return '***';
+                        return v.slice(0, 4) + '...' + v.slice(-4);
+                    };
+                    const redactHeaders = (headers) => {
+                        const h = { ...headers };
+                        for (const k of Object.keys(h)) {
+                            if (/auth|key|token|secret|bearer/i.test(k)) h[k] = redactKey(h[k]);
+                        }
+                        return h;
+                    };
+                    const formatJson = (obj) => {
+                        try { return JSON.stringify(obj, null, 2); } catch { return String(obj); }
+                    };
+                    const statusColor = r.status >= 200 && r.status < 300 ? 'text-green-400' : 'text-red-400';
+                    content.innerHTML = `
+                        <div class="space-y-3">
+                            <div class="flex items-center space-x-4 text-sm">
+                                <span class="text-gray-400">⏱️ ${new Date(r.timestamp).toLocaleString()}</span>
+                                <span class="${statusColor} font-bold">Status: ${r.status || 'N/A'}</span>
+                                <span class="text-gray-400">${r.duration ? r.duration + 'ms' : ''}</span>
+                                <span class="text-purple-300 font-mono">${r.method} ${r.url}</span>
+                            </div>
+                            <details class="bg-gray-800 rounded p-3">
+                                <summary class="cursor-pointer text-gray-300 font-semibold text-sm">📤 Request Headers</summary>
+                                <pre class="mt-2 text-xs text-gray-400 overflow-auto max-h-40 whitespace-pre-wrap">${formatJson(redactHeaders(r.headers || {}))}</pre>
+                            </details>
+                            <details class="bg-gray-800 rounded p-3" open>
+                                <summary class="cursor-pointer text-gray-300 font-semibold text-sm">📤 Request Body</summary>
+                                <pre class="mt-2 text-xs text-gray-400 overflow-auto max-h-60 whitespace-pre-wrap">${formatJson(r.body || {})}</pre>
+                            </details>
+                            <details class="bg-gray-800 rounded p-3">
+                                <summary class="cursor-pointer text-gray-300 font-semibold text-sm">📥 Response ${r.streaming ? '(Streaming - partial)' : ''}</summary>
+                                <pre class="mt-2 text-xs text-gray-400 overflow-auto max-h-60 whitespace-pre-wrap">${typeof r.response === 'string' ? r.response : formatJson(r.response || 'No response captured')}</pre>
+                            </details>
+                        </div>
+                    `;
+                }
+                panel.classList.remove('hidden');
+            });
+
+            document.getElementById('cpm-api-view-close').addEventListener('click', () => {
+                document.getElementById('cpm-api-view-panel').classList.add('hidden');
             });
 
             // initialize list
