@@ -1,5 +1,5 @@
 // @name CPM Provider - OpenAI
-// @version 1.5.0
+// @version 1.5.1
 // @description OpenAI provider for Cupcake PM (Streaming, Key Rotation)
 // @icon 🟢
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-openai.js
@@ -83,7 +83,7 @@
             };
 
             // Helper: validate service_tier value
-            const validServiceTiers = new Set(['auto', 'flex', 'default']);
+            const validServiceTiers = new Set(['flex', 'default']);
 
             const url = config.url || 'https://api.openai.com/v1/chat/completions';
             const modelName = config.model || 'gpt-4o';
@@ -115,11 +115,6 @@
                     }
                 }
 
-                if (config.maxout) {
-                    body.max_output_tokens = maxTokens;
-                    delete body.max_tokens;
-                    delete body.max_completion_tokens;
-                }
                 if (config.reasoning && config.reasoning !== 'none') { body.reasoning_effort = config.reasoning; delete body.temperature; }
                 if (config.verbosity && config.verbosity !== 'none') body.verbosity = config.verbosity;
 
@@ -138,15 +133,7 @@
                     headers['X-Request-Id'] = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString();
                 }
 
-                const bodyJSON = JSON.stringify(body);
-                let safeBody = bodyJSON;
-                try {
-                    const parsed = JSON.parse(bodyJSON);
-                    if (Array.isArray(parsed.messages)) {
-                        parsed.messages = parsed.messages.filter(m => m != null && typeof m === 'object' && m.content !== null && m.content !== undefined);
-                    }
-                    safeBody = JSON.stringify(parsed);
-                } catch (_) { /* use original */ }
+                const safeBody = JSON.stringify(body);
 
                 const fetchFn = typeof CPM.smartNativeFetch === 'function' ? CPM.smartNativeFetch : Risuai.nativeFetch;
                 const res = await fetchFn(url, { method: 'POST', headers, body: safeBody });

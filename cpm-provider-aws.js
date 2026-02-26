@@ -1,5 +1,5 @@
 // @name CPM Provider - AWS Bedrock
-// @version 1.4.0
+// @version 1.4.1
 // @description AWS Bedrock (Claude) provider for Cupcake PM (Streaming)
 // @icon 🔶
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-aws.js
@@ -129,7 +129,6 @@
                 return { success: false, content: "[AWS Bedrock] Access Key, Secret, Region, and Model are required." };
             }
 
-            // Fixed: formatToAnthropic returns { messages, system }, not { anthropicMessages, systemPrompt }
             const { messages: anthropicMessages, system: systemPrompt } = CPM.formatToAnthropic(messages);
             const body = {
                 messages: anthropicMessages,
@@ -143,13 +142,13 @@
 
             // Thinking support
             const isAdaptiveModel = ADAPTIVE_THINKING_MODEL_PATTERNS.some(p => config.model.includes(p));
-            if (isAdaptiveModel && (config.effort || config.budget > 0)) {
+            if (isAdaptiveModel && (config.effort || parseInt(config.budget) > 0)) {
                 // Claude 4.6 models: use adaptive thinking
                 body.thinking = { type: 'adaptive' };
                 const effort = config.effort && EFFORT_OPTIONS.includes(config.effort) ? config.effort : 'high';
                 body.output_config = { effort };
                 delete body.temperature;
-            } else if (config.budget && config.budget > 0) {
+            } else if (config.budget && parseInt(config.budget) > 0) {
                 // Legacy models: use manual extended thinking
                 body.thinking = { type: 'enabled', budget_tokens: parseInt(config.budget) };
                 if (body.max_tokens <= body.thinking.budget_tokens) body.max_tokens = body.thinking.budget_tokens + 4096;

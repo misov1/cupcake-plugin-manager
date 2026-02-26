@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.11.1
+//@version 1.11.2
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.11.1';
+const CPM_VERSION = '1.11.2';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -57,11 +57,6 @@ const CPM_VERSION = '1.11.1';
 
 // --- Global Tool Configs ---
 //@arg tools_githubCopilotToken string GitHub Copilot Token
-
-// --- AWS Configs ---
-//@arg cpm_aws_key string AWS Access Key
-//@arg cpm_aws_secret string AWS Secret Access Key
-//@arg cpm_aws_region string AWS Region
 
 // --- Global Chat Configs ---
 //@arg chat_claude_caching string Claude Caching (true/false)
@@ -142,17 +137,8 @@ function stripInternalTags(text) {
 }
 
 /**
- * NUCLEAR-SAFE JSON.stringify: uses a custom replacer that physically prevents
- * null/undefined entries from appearing in ANY array during serialization.
- *
- * Why this is needed: standard JSON.stringify converts undefined array elements
- * to null, and objects with toJSON() returning undefined also become null.
- * Pre-stringify .filter() calls cannot catch these cases because toJSON()
- * is only invoked DURING serialization, not before.
- *
- * The replacer intercepts every value during serialization. When it encounters
- * an array, it returns a filtered copy with null/undefined removed.
- * This is the definitive fix — no null can survive this.
+ * Safe JSON.stringify: replacer removes null/undefined from all arrays during serialization.
+ * Catches nulls from toJSON(), undefined→null conversion, etc.
  */
 function safeStringify(obj) {
     return JSON.stringify(obj, function(_key, value) {
@@ -164,13 +150,9 @@ function safeStringify(obj) {
 }
 
 /**
- * Deep-sanitize a messages array: remove null/undefined entries,
- * strip internal RisuAI tags, and filter messages with truly empty content.
+ * Deep-sanitize messages array: remove null/undefined entries,
+ * strip internal RisuAI tags, filter messages with empty content.
  * Returns a NEW array — never mutates the input.
- *
- * Validates: non-null object, has string role, content is not null/undefined.
- * Messages with null content are removed because they cause API 400 errors
- * ("expected an object, but got null instead").
  */
 function sanitizeMessages(messages) {
     if (!Array.isArray(messages)) return [];
@@ -178,23 +160,10 @@ function sanitizeMessages(messages) {
     for (let i = 0; i < messages.length; i++) {
         const m = messages[i];
         // Skip null, undefined, non-objects
-        if (m == null || typeof m !== 'object') {
-            console.warn(`[Cupcake PM] sanitizeMessages: skipped non-object at index ${i} (type=${typeof m})`);
-            continue;
-        }
-        // Skip messages without a valid string role
-        if (typeof m.role !== 'string' || !m.role) {
-            console.warn(`[Cupcake PM] sanitizeMessages: skipped message with invalid role at index ${i} (role=${JSON.stringify(m.role)})`);
-            continue;
-        }
-        // Skip messages where content is explicitly null/undefined
-        // (These survive JSON round-trips and cause API "null message" errors)
-        if (m.content === null || m.content === undefined) {
-            console.warn(`[Cupcake PM] sanitizeMessages: skipped message with null/undefined content at index ${i} (role=${m.role})`);
-            continue;
-        }
+        if (m == null || typeof m !== 'object') continue;
+        if (typeof m.role !== 'string' || !m.role) continue;
+        if (m.content === null || m.content === undefined) continue;
         const cleaned = { ...m };
-        // Strip toJSON if somehow inherited (prevents JSON.stringify producing null)
         if (typeof cleaned.toJSON === 'function') delete cleaned.toJSON;
         if (typeof cleaned.content === 'string') {
             cleaned.content = stripInternalTags(cleaned.content);
@@ -205,86 +174,33 @@ function sanitizeMessages(messages) {
 }
 
 /**
- * Absolute last-line-of-defense: parse a JSON body string, filter null entries
- * from the messages/contents arrays, and re-stringify using safeStringify.
- *
- * Two-phase sanitization:
- *   Phase 1: Parse → explicit filter with logging → catches known null patterns
- *   Phase 2: Re-stringify via safeStringify (replacer) → catches ANY null in ANY
- *            array, including nulls produced by toJSON(), undefined→null conversion,
- *            or any other JSON.stringify edge case.
- *
- * CRITICAL: This is the final safeguard before the body crosses the V3 iframe
- * bridge (postMessage) and reaches the RisuAI proxy. Neither of those layers
- * are under our control, so we must ensure the JSON is absolutely clean here.
+ * Last-line-of-defense: parse JSON body, filter null entries from messages/contents,
+ * re-stringify via safeStringify to catch any remaining nulls.
  */
 function sanitizeBodyJSON(jsonStr) {
     try {
         const obj = JSON.parse(jsonStr);
         if (Array.isArray(obj.messages)) {
             const before = obj.messages.length;
-            obj.messages = obj.messages.filter((m, idx) => {
-                if (m == null) {
-                    console.warn(`[Cupcake PM] ⚠️ sanitizeBodyJSON: removed NULL at messages[${idx}]`);
-                    return false;
-                }
-                if (typeof m !== 'object') {
-                    console.warn(`[Cupcake PM] ⚠️ sanitizeBodyJSON: removed non-object at messages[${idx}] (type=${typeof m})`);
-                    return false;
-                }
-                // Remove messages with null/undefined content (API rejects these)
-                if (m.content === null || m.content === undefined) {
-                    console.warn(`[Cupcake PM] ⚠️ sanitizeBodyJSON: removed message with null content at messages[${idx}] (role=${m.role})`);
-                    return false;
-                }
-                // Remove messages with missing/invalid role
-                if (typeof m.role !== 'string' || !m.role) {
-                    console.warn(`[Cupcake PM] ⚠️ sanitizeBodyJSON: removed message with invalid role at messages[${idx}]`);
-                    return false;
-                }
-                // Strip toJSON from message objects to prevent null serialization
-                if (typeof m.toJSON === 'function') {
-                    delete m.toJSON;
-                    console.warn(`[Cupcake PM] ⚠️ sanitizeBodyJSON: stripped toJSON from messages[${idx}]`);
-                }
+            obj.messages = obj.messages.filter(m => {
+                if (m == null || typeof m !== 'object') return false;
+                if (m.content === null || m.content === undefined) return false;
+                if (typeof m.role !== 'string' || !m.role) return false;
+                if (typeof m.toJSON === 'function') delete m.toJSON;
                 return true;
             });
             if (obj.messages.length < before) {
-                console.warn(`[Cupcake PM] ⚠️ sanitizeBodyJSON: total removed ${before - obj.messages.length} invalid entries from messages (was ${before}, now ${obj.messages.length})`);
+                console.warn(`[Cupcake PM] sanitizeBodyJSON: removed ${before - obj.messages.length} invalid entries from messages`);
             }
         }
         if (Array.isArray(obj.contents)) {
             const before = obj.contents.length;
-            obj.contents = obj.contents.filter((m, idx) => {
-                if (m == null || typeof m !== 'object') {
-                    console.warn(`[Cupcake PM] ⚠️ sanitizeBodyJSON: removed null/invalid entry from contents[${idx}]`);
-                    return false;
-                }
-                return true;
-            });
+            obj.contents = obj.contents.filter(m => m != null && typeof m === 'object');
             if (obj.contents.length < before) {
-                console.warn(`[Cupcake PM] ⚠️ sanitizeBodyJSON: removed ${before - obj.contents.length} null entries from contents`);
+                console.warn(`[Cupcake PM] sanitizeBodyJSON: removed ${before - obj.contents.length} null entries from contents`);
             }
         }
-        // Phase 2: Use safeStringify (replacer) to catch ANY remaining null in ANY array.
-        // This is the nuclear option — the replacer runs during serialization itself,
-        // catching nulls from toJSON(), undefined→null conversion, etc.
-        const result = safeStringify(obj);
-
-        // Phase 3: Post-verification — parse the result and check for null array elements.
-        // If any null survived even the replacer (should be impossible), log for diagnosis.
-        try {
-            const verify = JSON.parse(result);
-            if (Array.isArray(verify.messages)) {
-                for (let i = 0; i < verify.messages.length; i++) {
-                    if (verify.messages[i] == null) {
-                        console.error(`[Cupcake PM] 🚨 CRITICAL: null SURVIVED all sanitization at messages[${i}]! Body dump:`, result.substring(0, 2000));
-                    }
-                }
-            }
-        } catch (_) { /* verification parse failed — not critical */ }
-
-        return result;
+        return safeStringify(obj);
     } catch (e) {
         console.error('[Cupcake PM] sanitizeBodyJSON: JSON parse/stringify failed:', e.message);
         return jsonStr;
@@ -293,22 +209,11 @@ function sanitizeBodyJSON(jsonStr) {
 
 /**
  * Smart native fetch: 3-strategy fallback for V3 iframe sandbox.
- *
- * Strategy 1: Direct fetch() from iframe — works if CSP allows (non-iframe or relaxed CSP).
- * Strategy 2: Risuai.nativeFetch — goes through RisuAI cloud proxy (sv.risuai.xyz/proxy2).
- *             Supports streaming and preserves the EXACT body string (no re-parse/re-stringify).
- *             This avoids the "messages[N] is null" bug caused by the V3 postMessage bridge
- *             re-stringifying parsed body objects through fetchWithPlainFetch.
- * Strategy 3: Risuai.risuFetch(plainFetchForce) — direct fetch() from HOST window.
- *             Bypasses both iframe CSP and RisuAI cloud proxy. Used as fallback when
- *             the proxy fails (e.g., region-restricted APIs like Vertex AI).
- *             Trade-off: body object crosses postMessage bridge and gets re-stringified.
- *
- * Returns a native Response object, compatible with streaming (from Strategy 1 or 2)
- * or a wrapped non-streaming Response (from Strategy 3).
+ * Strategy 1: Direct fetch() → Strategy 2: nativeFetch (proxy) → Strategy 3: risuFetch (host window).
+ * Returns a native Response object, compatible with streaming.
  */
 async function smartNativeFetch(url, options = {}) {
-    // ── Final body sanitization before any network call ──
+    // Final body sanitization before any network call
     if (options.method === 'POST' && typeof options.body === 'string') {
         try {
             options = { ...options, body: sanitizeBodyJSON(options.body) };
@@ -317,21 +222,7 @@ async function smartNativeFetch(url, options = {}) {
         }
     }
 
-    // ── POST-sanitization diagnostic ──
-    if (options.method === 'POST' && typeof options.body === 'string') {
-        try {
-            const _ps = JSON.parse(options.body);
-            if (Array.isArray(_ps.messages)) {
-                for (let _i = 0; _i < _ps.messages.length; _i++) {
-                    if (_ps.messages[_i] == null) {
-                        console.error(`[CupcakePM] 🚨 POST-SANITIZE NULL at messages[${_i}] in smartNativeFetch!`);
-                    }
-                }
-            }
-        } catch (_) {}
-    }
-
-    // Strategy 1: Direct browser fetch from iframe (bypasses proxy if CSP allows)
+    // Strategy 1: Direct browser fetch from iframe
     try {
         const res = await fetch(url, options);
         return res;
@@ -341,13 +232,7 @@ async function smartNativeFetch(url, options = {}) {
     }
 
     // Strategy 2: Risuai.nativeFetch with body as Uint8Array
-    // IMPORTANT: Encode body string to Uint8Array (binary) in the GUEST iframe BEFORE
-    // crossing the postMessage bridge. This avoids potential issues with long string
-    // serialization in postMessage structured clone. On the host side, fetchNative
-    // receives a Uint8Array and uses it directly (no re-encoding step).
-    // The Uint8Array's underlying ArrayBuffer is TRANSFERRED (zero-copy) across the bridge,
-    // which is both faster and avoids any string handling edge cases.
-    let proxyErrorResponse = null; // Save proxy error response for fallback if Strategy 3 also fails
+    let proxyErrorResponse = null;
     try {
         console.log(`[CupcakePM] Using nativeFetch (proxy) for ${url.substring(0, 60)}...`);
         const nfOptions = { ...options };
@@ -392,15 +277,8 @@ async function smartNativeFetch(url, options = {}) {
         console.log(`[CupcakePM] nativeFetch failed: ${e.message}. Trying risuFetch direct...`);
     }
 
-    // Strategy 3: risuFetch with plainFetchForce — direct fetch from HOST window
-    // Bypasses both iframe CSP sandbox AND cloud proxy.
-    // CRITICAL FIX: The host's fetchWithPlainFetch does `JSON.stringify(arg.body)`.
-    // If we pass the body as a parsed object, the host re-stringifies it with standard
-    // JSON.stringify (without our safe replacer), which can re-introduce nulls.
-    // SOLUTION: Instead, we pass a special wrapper that preserves the exact body string.
-    // Since fetchWithPlainFetch always does JSON.stringify(arg.body), if arg.body is already
-    // a string, it would double-stringify. So we must pass as object.
-    // But we deep-clone and filter exhaustively before crossing the bridge.
+    // Strategy 3: risuFetch with plainFetchForce — direct fetch from HOST window.
+    // Body must be passed as object (host re-stringifies), so deep-clone and filter first.
     if (typeof Risuai.risuFetch === 'function') {
         try {
             let bodyObj = undefined;
@@ -410,12 +288,9 @@ async function smartNativeFetch(url, options = {}) {
                 bodyObj = options.body;
             }
 
-            // ── Deep-sanitize body object before it crosses the postMessage bridge ──
-            // Deep plain clone via JSON round-trip strips hidden toJSON, getters, prototype chains.
-            // Reconstruct every message as a minimal plain object (only known safe keys).
+            // Deep-sanitize body object before it crosses the postMessage bridge
             if (bodyObj && typeof bodyObj === 'object') {
                 if (Array.isArray(bodyObj.messages)) {
-                    // Nuclear deep-clone: serialize → parse → manually reconstruct each message
                     try {
                         const rawMsgs = JSON.parse(JSON.stringify(bodyObj.messages));
                         bodyObj.messages = [];
@@ -424,8 +299,6 @@ async function smartNativeFetch(url, options = {}) {
                             if (_rm == null || typeof _rm !== 'object') continue;
                             if (typeof _rm.role !== 'string' || !_rm.role) continue;
                             if (_rm.content === null || _rm.content === undefined) continue;
-                            // Reconstruct with ONLY safe keys — no hidden properties can survive
-                            // Normalize non-OpenAI roles: model/char → assistant
                             let _safeRole = _rm.role;
                             if (_safeRole === 'model' || _safeRole === 'char') _safeRole = 'assistant';
                             const safeMsg = { role: _safeRole, content: _rm.content };
@@ -441,17 +314,6 @@ async function smartNativeFetch(url, options = {}) {
                 if (Array.isArray(bodyObj.contents)) {
                     try { bodyObj.contents = JSON.parse(JSON.stringify(bodyObj.contents)); } catch (_) {}
                     bodyObj.contents = bodyObj.contents.filter(m => m != null && typeof m === 'object');
-                }
-            }
-
-            // Diagnostic: verify body object before risuFetch
-            if (bodyObj && Array.isArray(bodyObj.messages)) {
-                console.log(`[CupcakePM] Strategy 3: ${bodyObj.messages.length} messages before risuFetch`);
-                for (let _rfi = 0; _rfi < bodyObj.messages.length; _rfi++) {
-                    const _rfm = bodyObj.messages[_rfi];
-                    if (_rfm == null) {
-                        console.error(`[CupcakePM] 🚨 Strategy 3: messages[${_rfi}] is NULL before risuFetch!`);
-                    }
                 }
             }
 
@@ -702,18 +564,7 @@ const SubPluginManager = {
     },
 
     // ── Single-Bundle Update System ──
-    // Constraints of RisuAI's web environment:
-    //   1. iframe CSP blocks all cross-origin fetch() → can't use direct fetch
-    //   2. nativeFetch goes through proxy2 which caches PER-DOMAIN → cache poisoning
-    //   3. risuFetch(plainFetchForce) runs in HOST window, bypasses proxy2,
-    //      BUT always adds Content-Type: application/json header → triggers CORS preflight
-    //   4. raw.githubusercontent.com doesn't support OPTIONS preflight → CORS fails
-    //
-    // Solution: Vercel API route (/api/update-bundle) that:
-    //   - Properly handles OPTIONS preflight (returns 204 with CORS headers)
-    //   - Serves combined {versions, code} bundle as JSON
-    //   - risuFetch(plainFetchForce) bypasses proxy2 → no cache poisoning
-    //   - Vercel fully supports CORS preflight → no CORS errors
+    // Uses Vercel API route (/api/update-bundle) via risuFetch(plainFetchForce) to bypass iframe CSP + proxy2 cache issues.
 
     UPDATE_BUNDLE_URL: 'https://cupcake-plugin-manager.vercel.app/api/update-bundle',
 
@@ -724,11 +575,7 @@ const SubPluginManager = {
             const cacheBuster = this.UPDATE_BUNDLE_URL + '?_t=' + Date.now() + '_r=' + Math.random().toString(36).substr(2, 8);
             console.log(`[CPM Update] Fetching update bundle via risuFetch(plainFetchForce): ${cacheBuster}`);
 
-            // risuFetch with plainFetchForce: true
-            //   - Runs fetch() in the HOST window (not the sandboxed iframe) → bypasses CSP
-            //   - plainFetchForce bypasses proxy2 entirely → no cache poisoning
-            //   - Vercel API route handles OPTIONS preflight → no CORS errors
-            //   - Returns { ok, data, headers, status } with data auto-parsed as JSON
+            // risuFetch(plainFetchForce): HOST-window fetch, bypasses proxy2 + CSP
             const result = await Risuai.risuFetch(cacheBuster, {
                 method: 'GET',
                 plainFetchForce: true,
@@ -912,18 +759,8 @@ const SubPluginManager = {
 // KEY ROTATION (키 회전)
 // ==========================================
 /**
- * KeyPool: LBI-style key rotation for API keys.
- *
- * Keys are stored as whitespace-separated strings in a single //@arg field.
- * On each request, a random key is picked from the pool.
- * On retryable errors (429/529), the failed key is removed from the pool
- * and a new key is tried automatically.
- *
- * Usage in sub-plugins:
- *   const key = await CPM.pickKey('cpm_openai_key');
- *   CPM.drainKey('cpm_openai_key', failedKey);  // on 429
- *   // Or use the all-in-one wrapper:
- *   return CPM.withKeyRotation('cpm_openai_key', async (key) => { ... });
+ * KeyPool: LBI-style key rotation. Keys are whitespace-separated in //@arg fields.
+ * Random pick per request; on 429/529/503, drain failed key and retry.
  */
 const KeyPool = {
     _pools: {}, // argName -> { lastRaw: string, keys: string[] }
@@ -971,18 +808,8 @@ const KeyPool = {
         delete this._pools[argName];
     },
 
-    /**
-     * All-in-one wrapper: pick key → call fetchFn(key) → on retryable error,
-     * drain key and retry with a new one.
-     *
-     * fetchFn(key) should return { success, content, _status? }
-     * _status is the HTTP status code (used to detect retryable errors).
-     *
-     * @param {string} argName - The //@arg key name (e.g. 'cpm_openai_key')
-     * @param {function(string): Promise<object>} fetchFn - async (key) => result
-     * @param {object} [opts] - { maxRetries?, isRetryable? }
-     * @returns {Promise<object>} The fetch result
-     */
+    /** Pick key → fetchFn(key) → on retryable error, drain and retry. */
+
     async withRotation(argName, fetchFn, opts = {}) {
         const maxRetries = opts.maxRetries || 30;
         const isRetryable = opts.isRetryable || ((result) => {
@@ -1018,11 +845,7 @@ const KeyPool = {
 
     // ── JSON Credential Rotation (Vertex AI 등 JSON 크레덴셜용) ──
 
-    /**
-     * Extract individual JSON objects from a raw textarea string.
-     * Supports: single object, comma-separated objects ({...},{...}),
-     *           JSON array ([{...},{...}]), newline-separated objects.
-     */
+    /** Extract individual JSON objects from raw textarea (single, comma-separated, array, or newline-separated). */
     _parseJsonCredentials(raw) {
         const trimmed = (raw || '').trim();
         if (!trimmed) return [];
@@ -1062,12 +885,7 @@ const KeyPool = {
         return keys[Math.floor(Math.random() * keys.length)];
     },
 
-    /**
-     * All-in-one wrapper for JSON credential rotation.
-     * Like withRotation but uses pickJson for credential parsing.
-     *
-     * fetchFn(credentialJson) should return { success, content, _status? }
-     */
+    /** Like withRotation but uses pickJson for JSON credential parsing. */
     async withJsonRotation(argName, fetchFn, opts = {}) {
         const maxRetries = opts.maxRetries || 30;
         const isRetryable = opts.isRetryable || ((result) => {
@@ -1549,23 +1367,8 @@ async function collectStream(stream) {
 // ==========================================
 // 3.6 STREAM BRIDGE CAPABILITY DETECTION
 // ==========================================
-/**
- * Detects whether the RisuAI V3 iframe bridge can transfer ReadableStream objects
- * from the Guest (plugin iframe) to the Host (main window).
- *
- * The V3 bridge's Guest-side collectTransferables() may not include ReadableStream,
- * causing a DataCloneError when postMessage tries to structured-clone the stream.
- *
- * Two-phase detection:
- *   Phase 1 – Check if ReadableStream is structured-cloneable (postMessage WITHOUT transfer list).
- *             If yes, the bridge works even without a patch.
- *   Phase 2 – Check if the Guest bridge source code includes ReadableStream in collectTransferables.
- *             If yes AND the browser supports ReadableStream as Transferable, the bridge is patched.
- *
- * The result is cached after the first probe.
- *
- * @returns {Promise<boolean>} true if returning a ReadableStream from addProvider callback is safe
- */
+/** Detect if V3 iframe bridge can transfer ReadableStream. Cached after first probe. */
+
 let _streamBridgeCapable = null;
 async function checkStreamCapability() {
     if (_streamBridgeCapable !== null) return _streamBridgeCapable;
@@ -1687,21 +1490,13 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
         systemPrompt = anthropicSys;
     } else if (format === 'google') {
         const { contents: geminiContents, systemInstruction: geminiSys } = formatToGemini(messages, config);
-        // For custom, we'll just pass the contents and systemInstruction as separate fields if needed
-        // Or, if the custom endpoint expects OpenAI-like, we'd need to convert.
-        // For simplicity, let's assume custom endpoints are mostly OpenAI-compatible unless specified.
-        // If 'google' format is chosen, we'll pass the Gemini-formatted messages.
-        // This might need further refinement based on actual custom API expectations.
         formattedMessages = geminiContents;
         systemPrompt = geminiSys.length > 0 ? geminiSys.join('\n\n') : '';
     } else { // Default to OpenAI
         formattedMessages = formatToOpenAI(messages, config);
     }
 
-    // ── Final role normalization for OpenAI-compatible APIs ──
-    // Even after formatToOpenAI, roles may be non-standard if config.altrole was set
-    // or if RisuAI sent non-standard roles. OpenAI APIs only accept: system, user, assistant, tool, function, developer.
-    // 'model' (Gemini), 'char' (RisuAI internal) → 'assistant'
+    // Final role normalization for OpenAI-compatible APIs
     if (format === 'openai' && Array.isArray(formattedMessages)) {
         const _validOpenAIRoles = new Set(['system', 'user', 'assistant', 'tool', 'function', 'developer']);
         for (let _ri = 0; _ri < formattedMessages.length; _ri++) {
@@ -1768,17 +1563,12 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
         body.messages = formattedMessages;
     }
 
-    // ===== FINAL SAFETY: deep-clone + filter messages array =====
-    // Deep plain clone via JSON round-trip eliminates hidden prototype chains,
-    // getters, toJSON methods, and any non-plain-object artifacts that could
-    // cause null entries to appear during serialization or proxy transit.
-    // This is the absolute last defense before JSON.stringify.
+    // Final safety: deep-clone + filter messages/contents arrays
     if (body.messages) {
         try {
-            // Deep plain clone: strips ALL non-data properties (toJSON, getters, prototype chains)
             body.messages = JSON.parse(JSON.stringify(body.messages));
         } catch (e) {
-            console.error('[Cupcake PM] ⚠️ Deep-clone of messages failed:', e.message);
+            console.error('[Cupcake PM] Deep-clone of messages failed:', e.message);
         }
         const before = body.messages.length;
         body.messages = body.messages.filter(m => {
@@ -1843,7 +1633,7 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
         }
     }
 
-    // Copilot + Effort auto-URL: effort 활성화 시 /v1/messages 엔드포인트로 자동 전환
+    // Copilot + Effort: auto-switch to /v1/messages endpoint
     let effectiveUrl = config.url;
     if (config.url && config.url.includes('githubcopilot.com') && config.effort && config.effort !== 'none') {
         if (format === 'anthropic') {
@@ -1905,52 +1695,8 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
             streamBody.stream = true;
         }
 
-        // Final safety: deep-clone + filter streaming body messages array
-        // Deep plain clone ensures no hidden properties survive into the final JSON
-        if (streamBody.messages) {
-            try { streamBody.messages = JSON.parse(JSON.stringify(streamBody.messages)); } catch (_) {}
-            streamBody.messages = streamBody.messages.filter(m => {
-                if (m == null || typeof m !== 'object') return false;
-                if (m.content === null || m.content === undefined) return false;
-                if (typeof m.role !== 'string' || !m.role) return false;
-                return true;
-            });
-        }
-        if (streamBody.contents) {
-            try { streamBody.contents = JSON.parse(JSON.stringify(streamBody.contents)); } catch (_) {}
-            streamBody.contents = streamBody.contents.filter(m => m != null && typeof m === 'object');
-        }
-
-        // Use safeStringify (nuclear replacer) → sanitizeBodyJSON (parse+filter+verify)
+        // Use safeStringify → sanitizeBodyJSON for final safety
         const finalBody = sanitizeBodyJSON(safeStringify(streamBody));
-
-        // ── Comprehensive diagnostic: verify final body before fetch ──
-        try {
-            const _diag = JSON.parse(finalBody);
-            if (Array.isArray(_diag.messages)) {
-                const _nullIdx = [];
-                for (let _i = 0; _i < _diag.messages.length; _i++) {
-                    if (_diag.messages[_i] == null) _nullIdx.push(_i);
-                }
-                if (_nullIdx.length > 0) {
-                    console.error(`[Cupcake PM] 🚨 PRE-FETCH: null at messages indices [${_nullIdx.join(',')}] in ${_diag.messages.length} messages! Body preview:`, finalBody.substring(0, 1500));
-                } else {
-                    console.log(`[Cupcake PM] ✓ Pre-fetch body OK: ${_diag.messages.length} messages, model=${_diag.model}`);
-                }
-                // Detailed per-message dump for null-message debugging
-                for (let _d = 0; _d < _diag.messages.length; _d++) {
-                    const _m = _diag.messages[_d];
-                    if (_m == null) {
-                        console.error(`[Cupcake PM] 📋 messages[${_d}]: *** NULL ***`);
-                    } else {
-                        const _ct = typeof _m.content;
-                        const _cv = _ct === 'string' ? _m.content.substring(0, 60) : (Array.isArray(_m.content) ? `Array(${_m.content.length})` : JSON.stringify(_m.content).substring(0, 60));
-                        console.log(`[Cupcake PM] 📋 messages[${_d}]: role=${_m.role}, content_type=${_ct}, keys=[${Object.keys(_m).join(',')}], preview="${_cv}"`);
-                    }
-                }
-                console.log(`[Cupcake PM] 📋 Body length: ${finalBody.length} chars`);
-            }
-        } catch (_) {}
 
         const res = await smartNativeFetch(streamUrl, {
             method: 'POST',
@@ -2012,18 +1758,7 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
 // ==========================================
 
 async function fetchByProviderId(modelDef, args, abortSignal) {
-    // CRITICAL: Use ?? (nullish coalescing) not || (logical OR) for numeric fallbacks.
-    // || treats 0 as falsy → temperature=0 would become 0.7, which is wrong.
-    // ?? only falls back for null/undefined, preserving valid 0 values.
-    //
-    // Parameter source chain (highest priority first):
-    //   1. CPM slot overrides (cpm_slot_<slot>_temp etc.) — applied in handleRequest()
-    //   2. RisuAI separate parameters (db.seperateParameters[mode]) — applied by applyParameters() before plugin call
-    //   3. RisuAI main parameters (db.temperature etc.) — applied by applyParameters() when separate params disabled
-    //   4. CPM global fallback defaults (cpm_fallback_temp etc.) — user-configurable in CPM settings
-    //   5. Hardcoded default for temperature only (0.7) — max_tokens has NO hardcoded fallback
-    //      because RisuAI ALWAYS sends max_tokens from db.maxResponse (main model setting),
-    //      independent of parameter separation.
+    // Use ?? (nullish coalescing) not || for numeric fallbacks to preserve 0 values
     const cpmFallbackTemp = await safeGetArg('cpm_fallback_temp');
     const cpmFallbackMaxTokens = await safeGetArg('cpm_fallback_max_tokens');
     const cpmFallbackTopP = await safeGetArg('cpm_fallback_top_p');
@@ -2031,9 +1766,6 @@ async function fetchByProviderId(modelDef, args, abortSignal) {
     const cpmFallbackPresPen = await safeGetArg('cpm_fallback_pres_pen');
 
     const temp = args.temperature ?? (cpmFallbackTemp !== '' ? parseFloat(cpmFallbackTemp) : 0.7);
-    // max_tokens: RisuAI always sends this from db.maxResponse (main model's setting),
-    // regardless of parameter separation. No hardcoded 4096 — main model value is used.
-    // CPM global fallback only applies as a safety net if somehow undefined.
     const maxTokens = args.max_tokens ?? (cpmFallbackMaxTokens !== '' ? parseInt(cpmFallbackMaxTokens) : undefined);
 
     // Apply CPM global fallbacks for optional params (only when RisuAI didn't provide them)
@@ -2041,21 +1773,7 @@ async function fetchByProviderId(modelDef, args, abortSignal) {
     if (args.frequency_penalty === undefined && cpmFallbackFreqPen !== '') args.frequency_penalty = parseFloat(cpmFallbackFreqPen);
     if (args.presence_penalty === undefined && cpmFallbackPresPen !== '') args.presence_penalty = parseFloat(cpmFallbackPresPen);
 
-    // Diagnostic: log parameter values received from RisuAI (helps debug separate params issues)
-    console.log(`[Cupcake PM] 📊 Parameters for ${modelDef.name}: temp=${args.temperature}→${temp}, max_tokens=${args.max_tokens}→${maxTokens}, top_p=${args.top_p}, freq_pen=${args.frequency_penalty}, pres_pen=${args.presence_penalty}, top_k=${args.top_k}, rep_pen=${args.repetition_penalty}, min_p=${args.min_p}`);
-
-    // Deep-sanitize messages — RisuAI's runTrigger (JSON round-trip), V3 iframe
-    // postMessage bridge, and replacerbeforeRequest hooks can introduce null entries
-    // or leave internal tags ({{inlay::...}}, <qak>) in prompt_chat.
     const rawChat = args.prompt_chat;
-    // Diagnostic: check for null entries in raw prompt_chat (helps identify upstream source)
-    if (Array.isArray(rawChat)) {
-        const nullCount = rawChat.filter(m => m == null).length;
-        const badContentCount = rawChat.filter(m => m != null && typeof m === 'object' && (m.content === null || m.content === undefined)).length;
-        if (nullCount > 0 || badContentCount > 0) {
-            console.warn(`[Cupcake PM] ⚠️ prompt_chat from RisuAI has ${nullCount} null entries and ${badContentCount} null-content entries (total ${rawChat.length} messages)`);
-        }
-    }
     const messages = sanitizeMessages(rawChat);
 
     try {
@@ -2089,44 +1807,16 @@ async function fetchByProviderId(modelDef, args, abortSignal) {
 }
 
 async function handleRequest(args, activeModelDef, abortSignal) {
-    // ── Parameter Flow Documentation ──
-    // RisuAI V3 forces args.mode='v3' for security, so we cannot know the original
-    // request mode (translate/memory/emotion/submodel). However, the PARAMETERS
-    // (temperature, top_p, etc.) are already correctly applied by RisuAI's
-    // applyParameters() BEFORE they reach this plugin:
-    //
-    //   - If db.seperateParametersEnabled=true in RisuAI:
-    //     → args.temperature etc. come from db.seperateParameters[originalMode]
-    //     → These are the mode-specific separate parameter values the user configured
-    //   - If db.seperateParametersEnabled=false (default):
-    //     → args.temperature etc. come from db.temperature/100, db.top_p, etc.
-    //     → These are the main model's parameter values
-    //   - If separate params enabled but not configured for a mode:
-    //     → args.temperature etc. are UNDEFINED (RisuAI skips NaN values)
-    //     → Cupcake falls back to defaults (0.7 temp) or CPM slot overrides
-    //
-    // CPM's own slot parameter system provides an ADDITIONAL override layer on top
-    // of whatever RisuAI sends. CPM slot params only apply when:
-    //   1. The model is explicitly assigned to a CPM slot (translation/emotion/memory/other)
-    //   2. The slot param field is non-empty in CPM settings
-
     // V3 forces args.mode='v3', so we infer the slot from CPM's own slot config.
     const slot = await inferSlot(activeModelDef);
-
-    // Diagnostic: log what RisuAI passed us BEFORE any CPM overrides
-    console.log(`[Cupcake PM] 📥 Received from RisuAI — mode=${args.mode}, temp=${args.temperature}, top_p=${args.top_p}, freq_pen=${args.frequency_penalty}, pres_pen=${args.presence_penalty}, max_tokens=${args.max_tokens}, slot=${slot}, model=${activeModelDef.name}`);
 
     // Route to the provider that the UI / RisuAI selected
     let targetDef = activeModelDef;
 
     // If this model is assigned to an aux slot, apply generation param overrides
     if (slot !== 'chat') {
-        console.log(`[Cupcake PM] Aux slot detected: '${slot}' for model '${activeModelDef.name}'`);
-
         // Override generation params if provided for this slot.
-        // Empty string = don't override (keep RisuAI's value or CPM global fallback).
-        // IMPORTANT: Use !== '' check, not truthiness, to allow explicit 0 values.
-        // safeGetArg returns '' for unset fields, '0' for explicit zero.
+        // Empty string = don't override. Use !== '' to allow explicit 0 values.
         const maxOut = await safeGetArg(`cpm_slot_${slot}_max_out`);
         const maxCtx = await safeGetArg(`cpm_slot_${slot}_max_context`);
         const slotTemp = await safeGetArg(`cpm_slot_${slot}_temp`);
@@ -2144,24 +1834,11 @@ async function handleRequest(args, activeModelDef, abortSignal) {
         if (repPen !== '') args.repetition_penalty = parseFloat(repPen);
         if (freqPen !== '') args.frequency_penalty = parseFloat(freqPen);
         if (presPen !== '') args.presence_penalty = parseFloat(presPen);
-
-        console.log(`[Cupcake PM] 📝 After CPM slot overrides — temp=${args.temperature}, top_p=${args.top_p}, freq_pen=${args.frequency_penalty}, pres_pen=${args.presence_penalty}, max_tokens=${args.max_tokens}`);
     }
 
     const result = await fetchByProviderId(targetDef, args, abortSignal);
 
-    // ALWAYS collect ReadableStream into a plain string before returning.
-    //
-    // Why: RisuAI's requestPlugin returns type:'streaming' when content is a
-    // ReadableStream, but translateLLM (LLM translation) rejects streaming
-    // responses and skips cache saving. Since V3 bridge overrides mode to 'v3',
-    // the plugin cannot distinguish translation from chat requests.
-    //
-    // By always returning a string, requestPlugin returns type:'success',
-    // which allows translateLLM to properly cache retranslated results.
-    // For chat, the full response appears at once (no progressive streaming),
-    // but this is the expected behavior in V3 sandboxed iframe environments
-    // where ReadableStream transfer is unreliable.
+    // Always collect stream → string (V3 bridge can't reliably transfer ReadableStream)
     if (result && result.success && result.content instanceof ReadableStream) {
         result.content = await collectStream(result.content);
     }

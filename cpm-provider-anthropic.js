@@ -1,5 +1,5 @@
 // @name CPM Provider - Anthropic
-// @version 1.6.0
+// @version 1.6.1
 // @description Anthropic Claude provider for Cupcake PM (Streaming, Key Rotation)
 // @icon 🟠
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-anthropic.js
@@ -112,12 +112,12 @@
 
                 const isAdaptiveModel = ADAPTIVE_THINKING_MODELS.some(m => (config.model || '').startsWith(m));
 
-                if (isAdaptiveModel && (config.effort || config.budget > 0)) {
+                if (isAdaptiveModel && (config.effort || parseInt(config.budget) > 0)) {
                     body.thinking = { type: 'adaptive' };
                     const effort = config.effort && EFFORT_OPTIONS.includes(config.effort) ? config.effort : 'high';
                     body.output_config = { effort };
                     delete body.temperature;
-                } else if (config.budget && config.budget > 0) {
+                } else if (config.budget && parseInt(config.budget) > 0) {
                     body.thinking = { type: 'enabled', budget_tokens: parseInt(config.budget) };
                     if (body.max_tokens <= body.thinking.budget_tokens) body.max_tokens = body.thinking.budget_tokens + 4096;
                     delete body.temperature;

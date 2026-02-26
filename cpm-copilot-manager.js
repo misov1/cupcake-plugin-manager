@@ -1,7 +1,7 @@
 //@name CPM Component - Copilot Token Manager
 //@display-name Cupcake Copilot Manager
 //@api 3.0
-//@version 1.5.1
+//@version 1.5.2
 //@author Cupcake
 //@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-copilot-manager.js
 
@@ -281,6 +281,7 @@
         if (!res.ok) throw new Error(`액세스 토큰 요청 실패 (${res.status}): ${await res.text()}`);
         const data = await res.json();
         if (data.error === 'authorization_pending') throw new Error('인증이 아직 완료되지 않았습니다. GitHub에서 코드를 입력 후 다시 시도하세요.');
+        if (data.error === 'slow_down') throw new Error('요청이 너무 빈번합니다. 잠시 후 다시 시도하세요.');
         if (!data.access_token) throw new Error(`액세스 토큰을 찾을 수 없습니다: ${JSON.stringify(data)}`);
         return data.access_token;
     }
