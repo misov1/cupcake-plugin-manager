@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.10.18
+//@version 1.11.0
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.10.18';
+const CPM_VERSION = '1.11.0';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -909,6 +909,116 @@ const SubPluginManager = {
 };
 
 // ==========================================
+// KEY ROTATION (키 회전)
+// ==========================================
+/**
+ * KeyPool: LBI-style key rotation for API keys.
+ *
+ * Keys are stored as whitespace-separated strings in a single //@arg field.
+ * On each request, a random key is picked from the pool.
+ * On retryable errors (429/529), the failed key is removed from the pool
+ * and a new key is tried automatically.
+ *
+ * Usage in sub-plugins:
+ *   const key = await CPM.pickKey('cpm_openai_key');
+ *   CPM.drainKey('cpm_openai_key', failedKey);  // on 429
+ *   // Or use the all-in-one wrapper:
+ *   return CPM.withKeyRotation('cpm_openai_key', async (key) => { ... });
+ */
+const KeyPool = {
+    _pools: {}, // argName -> { lastRaw: string, keys: string[] }
+
+    /**
+     * Parse keys from the setting string (whitespace-separated), cache them,
+     * and return a random key from the pool.
+     */
+    async pick(argName) {
+        const raw = await safeGetArg(argName);
+        const pool = this._pools[argName];
+        if (!pool || pool.lastRaw !== raw || pool.keys.length === 0) {
+            this._pools[argName] = {
+                lastRaw: raw,
+                keys: (raw || '').trim().split(/\s+/).filter(k => k.length > 0)
+            };
+        }
+        const keys = this._pools[argName].keys;
+        if (keys.length === 0) return '';
+        return keys[Math.floor(Math.random() * keys.length)];
+    },
+
+    /**
+     * Remove a failed key from the pool. Returns remaining count.
+     */
+    drain(argName, failedKey) {
+        const pool = this._pools[argName];
+        if (!pool) return 0;
+        const idx = pool.keys.indexOf(failedKey);
+        if (idx > -1) pool.keys.splice(idx, 1);
+        return pool.keys.length;
+    },
+
+    /**
+     * Get the number of remaining keys in the pool.
+     */
+    remaining(argName) {
+        return this._pools[argName]?.keys?.length || 0;
+    },
+
+    /**
+     * Force re-parse keys from settings on next pick.
+     */
+    reset(argName) {
+        delete this._pools[argName];
+    },
+
+    /**
+     * All-in-one wrapper: pick key → call fetchFn(key) → on retryable error,
+     * drain key and retry with a new one.
+     *
+     * fetchFn(key) should return { success, content, _status? }
+     * _status is the HTTP status code (used to detect retryable errors).
+     *
+     * @param {string} argName - The //@arg key name (e.g. 'cpm_openai_key')
+     * @param {function(string): Promise<object>} fetchFn - async (key) => result
+     * @param {object} [opts] - { maxRetries?, isRetryable? }
+     * @returns {Promise<object>} The fetch result
+     */
+    async withRotation(argName, fetchFn, opts = {}) {
+        const maxRetries = opts.maxRetries || 30;
+        const isRetryable = opts.isRetryable || ((result) => {
+            if (!result._status) return false;
+            // 429 = rate limit, 529 = overloaded (DeepSeek), 503 = service unavailable
+            return result._status === 429 || result._status === 529 || result._status === 503;
+        });
+
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+            const key = await this.pick(argName);
+            if (!key) {
+                return { success: false, content: `[KeyPool] ${argName}에 사용 가능한 API 키가 없습니다. 설정에서 키를 확인하세요.` };
+            }
+
+            const result = await fetchFn(key);
+
+            // Success or non-retryable error → return immediately
+            if (result.success || !isRetryable(result)) return result;
+
+            // Retryable error → drain the failed key and try another
+            const remaining = this.drain(argName, key);
+            console.warn(`[KeyPool] \u{1F504} 키 교체: ${argName} (HTTP ${result._status}, 남은 키: ${remaining}개, 시도: ${attempt + 1})`);
+
+            if (remaining === 0) {
+                // All keys exhausted → force re-parse from settings in case user changed them
+                console.warn(`[KeyPool] \u{26A0}\u{FE0F} ${argName}의 모든 키가 소진되었습니다.`);
+                this.reset(argName);
+                return result;
+            }
+        }
+        return { success: false, content: `[KeyPool] 최대 재시도 횟수(${maxRetries})를 초과했습니다.` };
+    }
+};
+console.log('[CupcakePM] KeyPool (key rotation) initialized.');
+
+// ==========================================
 // CUPCAKE PM GLOBAL API
 // ==========================================
 window.CupcakePM = {
@@ -947,6 +1057,12 @@ window.CupcakePM = {
     safeGetArg,
     safeGetBoolArg,
     setArg: (k, v) => risuai.setArgument(k, String(v)),
+    // Key Rotation API (키 회전)
+    pickKey: (argName) => KeyPool.pick(argName),
+    drainKey: (argName, failedKey) => KeyPool.drain(argName, failedKey),
+    keyPoolRemaining: (argName) => KeyPool.remaining(argName),
+    resetKeyPool: (argName) => KeyPool.reset(argName),
+    withKeyRotation: (argName, fetchFn, opts) => KeyPool.withRotation(argName, fetchFn, opts),
     get vertexTokenCache() { return vertexTokenCache; },
     set vertexTokenCache(v) { vertexTokenCache = v; },
     AwsV4Signer,

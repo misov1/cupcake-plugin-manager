@@ -1,6 +1,6 @@
 // @name CPM Provider - OpenAI
-// @version 1.4.0
-// @description OpenAI provider for Cupcake PM (Streaming)
+// @version 1.5.0
+// @description OpenAI provider for Cupcake PM (Streaming, Key Rotation)
 // @icon 🟢
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-openai.js
 
@@ -24,7 +24,9 @@
         ],
         fetchDynamicModels: async () => {
             try {
-                const key = await CPM.safeGetArg('cpm_openai_key');
+                const key = typeof CPM.pickKey === 'function'
+                    ? await CPM.pickKey('cpm_openai_key')
+                    : await CPM.safeGetArg('cpm_openai_key');
                 if (!key) return null;
 
                 const res = await CPM.smartFetch('https://api.openai.com/v1/models', {
@@ -67,7 +69,6 @@
         fetcher: async function (modelDef, messages, temp, maxTokens, args, abortSignal) {
             const config = {
                 url: await CPM.safeGetArg('cpm_openai_url'),
-                key: await CPM.safeGetArg('cpm_openai_key'),
                 model: await CPM.safeGetArg('cpm_openai_model') || modelDef.id,
                 reasoning: await CPM.safeGetArg('cpm_openai_reasoning'),
                 verbosity: await CPM.safeGetArg('cpm_openai_verbosity'),
@@ -88,74 +89,77 @@
             const modelName = config.model || 'gpt-4o';
             const formattedMessages = CPM.formatToOpenAI(messages, config);
 
-            const body = {
-                model: modelName,
-                messages: Array.isArray(formattedMessages) ? formattedMessages.filter(m => m != null && typeof m === 'object') : [],
-                temperature: temp,
-                stream: true,
+            // Key Rotation: wrap fetch in withKeyRotation for automatic retry on 429/529
+            const doFetch = async (apiKey) => {
+                const body = {
+                    model: modelName,
+                    messages: Array.isArray(formattedMessages) ? formattedMessages.filter(m => m != null && typeof m === 'object') : [],
+                    temperature: temp,
+                    stream: true,
+                };
+
+                if (needsMaxCompletionTokens(modelName)) {
+                    body.max_completion_tokens = maxTokens;
+                } else {
+                    body.max_tokens = maxTokens;
+                }
+
+                if (args.top_p !== undefined && args.top_p !== null) body.top_p = args.top_p;
+                if (args.frequency_penalty !== undefined && args.frequency_penalty !== null) body.frequency_penalty = args.frequency_penalty;
+                if (args.presence_penalty !== undefined && args.presence_penalty !== null) body.presence_penalty = args.presence_penalty;
+
+                if (config.servicetier) {
+                    const tier = config.servicetier.trim().toLowerCase();
+                    if (tier && tier !== 'auto' && validServiceTiers.has(tier)) {
+                        body.service_tier = tier;
+                    }
+                }
+
+                if (config.maxout) {
+                    body.max_output_tokens = maxTokens;
+                    delete body.max_tokens;
+                    delete body.max_completion_tokens;
+                }
+                if (config.reasoning && config.reasoning !== 'none') { body.reasoning_effort = config.reasoning; delete body.temperature; }
+                if (config.verbosity && config.verbosity !== 'none') body.verbosity = config.verbosity;
+
+                const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` };
+                if (url.includes('githubcopilot.com')) {
+                    let copilotApiToken = '';
+                    if (typeof window.CupcakePM?.ensureCopilotApiToken === 'function') {
+                        copilotApiToken = await window.CupcakePM.ensureCopilotApiToken();
+                    } else if (window._cpmCopilotApiToken) {
+                        copilotApiToken = window._cpmCopilotApiToken;
+                    }
+                    if (copilotApiToken) {
+                        headers['Authorization'] = `Bearer ${copilotApiToken}`;
+                    }
+                    headers['Copilot-Integration-Id'] = 'vscode-chat';
+                    headers['X-Request-Id'] = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString();
+                }
+
+                const bodyJSON = JSON.stringify(body);
+                let safeBody = bodyJSON;
+                try {
+                    const parsed = JSON.parse(bodyJSON);
+                    if (Array.isArray(parsed.messages)) {
+                        parsed.messages = parsed.messages.filter(m => m != null && typeof m === 'object' && m.content !== null && m.content !== undefined);
+                    }
+                    safeBody = JSON.stringify(parsed);
+                } catch (_) { /* use original */ }
+
+                const fetchFn = typeof CPM.smartNativeFetch === 'function' ? CPM.smartNativeFetch : Risuai.nativeFetch;
+                const res = await fetchFn(url, { method: 'POST', headers, body: safeBody });
+                if (!res.ok) return { success: false, content: `[OpenAI Error ${res.status}] ${await res.text()}`, _status: res.status };
+                return { success: true, content: CPM.createSSEStream(res, CPM.parseOpenAISSELine, abortSignal) };
             };
 
-            // max_tokens vs max_completion_tokens: newer models require max_completion_tokens
-            if (needsMaxCompletionTokens(modelName)) {
-                body.max_completion_tokens = maxTokens;
-            } else {
-                body.max_tokens = maxTokens;
+            // Use key rotation if available, otherwise fall back to single key
+            if (typeof CPM.withKeyRotation === 'function') {
+                return CPM.withKeyRotation('cpm_openai_key', doFetch);
             }
-
-            if (args.top_p !== undefined && args.top_p !== null) body.top_p = args.top_p;
-            if (args.frequency_penalty !== undefined && args.frequency_penalty !== null) body.frequency_penalty = args.frequency_penalty;
-            if (args.presence_penalty !== undefined && args.presence_penalty !== null) body.presence_penalty = args.presence_penalty;
-
-            // service_tier: only send known valid lowercase values, skip empty/'auto' (default)
-            if (config.servicetier) {
-                const tier = config.servicetier.trim().toLowerCase();
-                if (tier && tier !== 'auto' && validServiceTiers.has(tier)) {
-                    body.service_tier = tier;
-                }
-            }
-
-            if (config.maxout) {
-                body.max_output_tokens = maxTokens;
-                delete body.max_tokens;
-                delete body.max_completion_tokens;
-            }
-            if (config.reasoning && config.reasoning !== 'none') { body.reasoning_effort = config.reasoning; delete body.temperature; }
-            if (config.verbosity && config.verbosity !== 'none') body.verbosity = config.verbosity;
-
-            const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.key}` };
-            // Copilot auto-detection: use ensureCopilotApiToken from provider-manager
-            // Per LBI reference: chat completions only needs Copilot-Integration-Id + X-Request-Id
-            if (url.includes('githubcopilot.com')) {
-                let copilotApiToken = '';
-                if (typeof window.CupcakePM?.ensureCopilotApiToken === 'function') {
-                    copilotApiToken = await window.CupcakePM.ensureCopilotApiToken();
-                } else if (window._cpmCopilotApiToken) {
-                    copilotApiToken = window._cpmCopilotApiToken;
-                }
-                if (copilotApiToken) {
-                    headers['Authorization'] = `Bearer ${copilotApiToken}`;
-                }
-                headers['Copilot-Integration-Id'] = 'vscode-chat';
-                headers['X-Request-Id'] = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString();
-            }
-
-            // Final safety: sanitize JSON body to remove any null message entries
-            const bodyJSON = JSON.stringify(body);
-            let safeBody = bodyJSON;
-            try {
-                const parsed = JSON.parse(bodyJSON);
-                if (Array.isArray(parsed.messages)) {
-                    parsed.messages = parsed.messages.filter(m => m != null && typeof m === 'object' && m.content !== null && m.content !== undefined);
-                }
-                safeBody = JSON.stringify(parsed);
-            } catch (_) { /* use original */ }
-
-            // Use smartNativeFetch: direct fetch() first (bypasses proxy region-blocking),
-            // falls back to nativeFetch (proxy) if direct fails.
-            const fetchFn = typeof CPM.smartNativeFetch === 'function' ? CPM.smartNativeFetch : Risuai.nativeFetch;
-            const res = await fetchFn(url, { method: 'POST', headers, body: safeBody });
-            if (!res.ok) return { success: false, content: `[OpenAI Error ${res.status}] ${await res.text()}` };
-            return { success: true, content: CPM.createSSEStream(res, CPM.parseOpenAISSELine, abortSignal) };
+            const fallbackKey = await CPM.safeGetArg('cpm_openai_key');
+            return doFetch(fallbackKey);
         },
         settingsTab: {
             id: 'tab-openai',
@@ -165,7 +169,7 @@
             renderContent: async (renderInput, lists) => {
                 return `
                     <h3 class="text-3xl font-bold text-green-400 mb-6 pb-3 border-b border-gray-700">OpenAI Configuration (설정)</h3>
-                    ${await renderInput('cpm_openai_key', 'API Key (sk-...)', 'password')}
+                    ${await renderInput('cpm_openai_key', 'API Key (sk-... \uc5ec\ub7ec \uac1c \uc785\ub825 \uc2dc \uacf5\ubc31/\uc904\ubc14\uafbc\uc73c\ub85c \uad6c\ubd84, \uc790\ub3d9 \ud0a4\ud68c\uc804)', 'password')}
                     ${await renderInput('cpm_dynamic_openai', '📡 서버에서 모델 목록 불러오기 (Fetch models from API)', 'checkbox')}
                     ${await renderInput('cpm_openai_reasoning', 'Reasoning Effort (추론 수준 - o3, o1 series)', 'select', lists.reasoningList)}
                     ${await renderInput('cpm_openai_verbosity', 'Response Verbosity (응답 상세)', 'select', lists.verbosityList)}

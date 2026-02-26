@@ -1,6 +1,6 @@
 // @name CPM Provider - Anthropic
-// @version 1.5.1
-// @description Anthropic Claude provider for Cupcake PM (Streaming)
+// @version 1.6.0
+// @description Anthropic Claude provider for Cupcake PM (Streaming, Key Rotation)
 // @icon 🟠
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-anthropic.js
 
@@ -40,7 +40,9 @@
         models,
         fetchDynamicModels: async () => {
             try {
-                const key = await CPM.safeGetArg('cpm_anthropic_key');
+                const key = typeof CPM.pickKey === 'function'
+                    ? await CPM.pickKey('cpm_anthropic_key')
+                    : await CPM.safeGetArg('cpm_anthropic_key');
                 if (!key) return null;
 
                 let allModels = [];
@@ -80,7 +82,6 @@
         fetcher: async function (modelDef, messages, temp, maxTokens, args, abortSignal) {
             const config = {
                 url: await CPM.safeGetArg('cpm_anthropic_url'),
-                key: await CPM.safeGetArg('cpm_anthropic_key'),
                 model: await CPM.safeGetArg('cpm_anthropic_model') || modelDef.id,
                 budget: await CPM.safeGetArg('cpm_anthropic_thinking_budget'),
                 effort: await CPM.safeGetArg('cpm_anthropic_thinking_effort'),
@@ -90,46 +91,54 @@
             const url = config.url || 'https://api.anthropic.com/v1/messages';
             const { messages: formattedMsgs, system: systemPrompt } = CPM.formatToAnthropic(messages, config);
 
-            const body = {
-                model: config.model || 'claude-3-5-sonnet-20241022',
-                max_tokens: maxTokens,
-                temperature: temp,
-                messages: formattedMsgs,
-                stream: true,
-            };
-            if (args.top_p !== undefined && args.top_p !== null) body.top_p = args.top_p;
-            if (args.top_k !== undefined && args.top_k !== null) body.top_k = args.top_k;
-            if (systemPrompt) {
-                if (config.caching) {
-                    body.system = [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }];
-                } else {
-                    body.system = systemPrompt;
+            // Key Rotation: wrap fetch in withKeyRotation for automatic retry on 429/529
+            const doFetch = async (apiKey) => {
+                const body = {
+                    model: config.model || 'claude-3-5-sonnet-20241022',
+                    max_tokens: maxTokens,
+                    temperature: temp,
+                    messages: formattedMsgs,
+                    stream: true,
+                };
+                if (args.top_p !== undefined && args.top_p !== null) body.top_p = args.top_p;
+                if (args.top_k !== undefined && args.top_k !== null) body.top_k = args.top_k;
+                if (systemPrompt) {
+                    if (config.caching) {
+                        body.system = [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }];
+                    } else {
+                        body.system = systemPrompt;
+                    }
                 }
+
+                const isAdaptiveModel = ADAPTIVE_THINKING_MODELS.some(m => (config.model || '').startsWith(m));
+
+                if (isAdaptiveModel && (config.effort || config.budget > 0)) {
+                    body.thinking = { type: 'adaptive' };
+                    const effort = config.effort && EFFORT_OPTIONS.includes(config.effort) ? config.effort : 'high';
+                    body.output_config = { effort };
+                    delete body.temperature;
+                } else if (config.budget && config.budget > 0) {
+                    body.thinking = { type: 'enabled', budget_tokens: parseInt(config.budget) };
+                    if (body.max_tokens <= body.thinking.budget_tokens) body.max_tokens = body.thinking.budget_tokens + 4096;
+                    delete body.temperature;
+                }
+
+                const fetchFn = typeof CPM.smartNativeFetch === 'function' ? CPM.smartNativeFetch : Risuai.nativeFetch;
+                const res = await fetchFn(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+                    body: JSON.stringify(body)
+                });
+                if (!res.ok) return { success: false, content: `[Anthropic Error ${res.status}] ${await res.text()}`, _status: res.status };
+                return { success: true, content: CPM.createAnthropicSSEStream(res, abortSignal) };
+            };
+
+            // Use key rotation if available, otherwise fall back to single key
+            if (typeof CPM.withKeyRotation === 'function') {
+                return CPM.withKeyRotation('cpm_anthropic_key', doFetch);
             }
-
-            const isAdaptiveModel = ADAPTIVE_THINKING_MODELS.some(m => (config.model || '').startsWith(m));
-
-            if (isAdaptiveModel && (config.effort || config.budget > 0)) {
-                // Claude 4.6 models: use adaptive thinking (manual mode is deprecated)
-                body.thinking = { type: 'adaptive' };
-                const effort = config.effort && EFFORT_OPTIONS.includes(config.effort) ? config.effort : 'high';
-                body.output_config = { effort };
-                delete body.temperature;
-            } else if (config.budget && config.budget > 0) {
-                // Legacy models: use manual extended thinking with budget_tokens
-                body.thinking = { type: 'enabled', budget_tokens: parseInt(config.budget) };
-                if (body.max_tokens <= body.thinking.budget_tokens) body.max_tokens = body.thinking.budget_tokens + 4096;
-                delete body.temperature;
-            }
-
-            const fetchFn = typeof CPM.smartNativeFetch === 'function' ? CPM.smartNativeFetch : Risuai.nativeFetch;
-            const res = await fetchFn(url, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'x-api-key': config.key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-                body: JSON.stringify(body)
-            });
-            if (!res.ok) return { success: false, content: `[Anthropic Error ${res.status}] ${await res.text()}` };
-            return { success: true, content: CPM.createAnthropicSSEStream(res, abortSignal) };
+            const fallbackKey = await CPM.safeGetArg('cpm_anthropic_key');
+            return doFetch(fallbackKey);
         },
         settingsTab: {
             id: 'tab-anthropic',
@@ -139,7 +148,7 @@
             renderContent: async (renderInput, lists) => {
                 return `
                     <h3 class="text-3xl font-bold text-orange-400 mb-6 pb-3 border-b border-gray-700">Anthropic Configuration (설정)</h3>
-                    ${await renderInput('cpm_anthropic_key', 'API Key (API 키)', 'password')}
+                    ${await renderInput('cpm_anthropic_key', 'API Key (API 키 - 여러 개 입력 시 공백/줄바꾼으로 구분, 자동 키회전)', 'password')}
                     ${await renderInput('cpm_dynamic_anthropic', '📡 서버에서 모델 목록 불러오기 (Fetch models from API)', 'checkbox')}
                     ${await renderInput('cpm_anthropic_thinking_budget', 'Thinking Budget Tokens (생각 토큰 예산 - 4.5 이하 모델용, 0은 끄기)', 'number')}
                     ${await renderInput('cpm_anthropic_thinking_effort', 'Adaptive Thinking Effort (4.6 모델용: low/medium/high/max)')}

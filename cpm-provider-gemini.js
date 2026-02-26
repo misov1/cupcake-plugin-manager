@@ -1,6 +1,6 @@
 // @name CPM Provider - Gemini Studio
-// @version 1.4.2
-// @description Google Gemini Studio (API Key) provider for Cupcake PM (Streaming)
+// @version 1.5.0
+// @description Google Gemini Studio (API Key) provider for Cupcake PM (Streaming, Key Rotation)
 // @icon 🔵
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-gemini.js
 
@@ -21,7 +21,9 @@
         models: GEMINI_MODELS,
         fetchDynamicModels: async () => {
             try {
-                const key = await CPM.safeGetArg('cpm_gemini_key');
+                const key = typeof CPM.pickKey === 'function'
+                    ? await CPM.pickKey('cpm_gemini_key')
+                    : await CPM.safeGetArg('cpm_gemini_key');
                 if (!key) return null;
 
                 let allModels = [];
@@ -64,7 +66,6 @@
         },
         fetcher: async function (modelDef, messages, temp, maxTokens, args, abortSignal) {
             const config = {
-                key: await CPM.safeGetArg('cpm_gemini_key'),
                 model: modelDef.id,
                 thinking: await CPM.safeGetArg('cpm_gemini_thinking_level'),
                 thinkingBudget: await CPM.safeGetArg('cpm_gemini_thinking_budget'),
@@ -74,27 +75,37 @@
             };
 
             const model = config.model || 'gemini-2.5-flash';
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?key=${config.key}&alt=sse`;
             const { contents, systemInstruction } = CPM.formatToGemini(messages, config);
 
-            const body = { contents, generationConfig: { temperature: temp, maxOutputTokens: maxTokens } };
-            if (args.top_p !== undefined && args.top_p !== null) body.generationConfig.topP = args.top_p;
-            if (args.top_k !== undefined && args.top_k !== null) body.generationConfig.topK = args.top_k;
-            if (args.frequency_penalty !== undefined && args.frequency_penalty !== null) body.generationConfig.frequencyPenalty = args.frequency_penalty;
-            if (args.presence_penalty !== undefined && args.presence_penalty !== null) body.generationConfig.presencePenalty = args.presence_penalty;
-            if (systemInstruction.length > 0) body.systemInstruction = { parts: systemInstruction.map(text => ({ text })) };
-            // Gemini 3: thinkMode (level string), Gemini 2.5: thinkingBudget (number)
-            if (typeof CPM.buildGeminiThinkingConfig === 'function') {
-                const _tc = CPM.buildGeminiThinkingConfig(model, config.thinking, config.thinkingBudget);
-                if (_tc) body.generationConfig.thinkingConfig = _tc;
-            } else if (config.thinking && config.thinking !== 'off' && config.thinking !== 'none') {
-                body.generationConfig.thinkingConfig = { thinkMode: config.thinking };
-            }
+            // Key Rotation: wrap fetch in withKeyRotation for automatic retry on 429/529
+            const doFetch = async (apiKey) => {
+                const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?key=${apiKey}&alt=sse`;
 
-            const fetchFn = typeof CPM.smartNativeFetch === 'function' ? CPM.smartNativeFetch : Risuai.nativeFetch;
-            const res = await fetchFn(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-            if (!res.ok) return { success: false, content: `[Gemini Error ${res.status}] ${await res.text()}` };
-            return { success: true, content: CPM.createSSEStream(res, (line) => CPM.parseGeminiSSELine(line, config), abortSignal) };
+                const body = { contents, generationConfig: { temperature: temp, maxOutputTokens: maxTokens } };
+                if (args.top_p !== undefined && args.top_p !== null) body.generationConfig.topP = args.top_p;
+                if (args.top_k !== undefined && args.top_k !== null) body.generationConfig.topK = args.top_k;
+                if (args.frequency_penalty !== undefined && args.frequency_penalty !== null) body.generationConfig.frequencyPenalty = args.frequency_penalty;
+                if (args.presence_penalty !== undefined && args.presence_penalty !== null) body.generationConfig.presencePenalty = args.presence_penalty;
+                if (systemInstruction.length > 0) body.systemInstruction = { parts: systemInstruction.map(text => ({ text })) };
+                if (typeof CPM.buildGeminiThinkingConfig === 'function') {
+                    const _tc = CPM.buildGeminiThinkingConfig(model, config.thinking, config.thinkingBudget);
+                    if (_tc) body.generationConfig.thinkingConfig = _tc;
+                } else if (config.thinking && config.thinking !== 'off' && config.thinking !== 'none') {
+                    body.generationConfig.thinkingConfig = { thinkMode: config.thinking };
+                }
+
+                const fetchFn = typeof CPM.smartNativeFetch === 'function' ? CPM.smartNativeFetch : Risuai.nativeFetch;
+                const res = await fetchFn(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+                if (!res.ok) return { success: false, content: `[Gemini Error ${res.status}] ${await res.text()}`, _status: res.status };
+                return { success: true, content: CPM.createSSEStream(res, (line) => CPM.parseGeminiSSELine(line, config), abortSignal) };
+            };
+
+            // Use key rotation if available, otherwise fall back to single key
+            if (typeof CPM.withKeyRotation === 'function') {
+                return CPM.withKeyRotation('cpm_gemini_key', doFetch);
+            }
+            const fallbackKey = await CPM.safeGetArg('cpm_gemini_key');
+            return doFetch(fallbackKey);
         },
         settingsTab: {
             id: 'tab-gemini',
@@ -104,7 +115,7 @@
             renderContent: async (renderInput, lists) => {
                 return `
                     <h3 class="text-3xl font-bold text-indigo-400 mb-6 pb-3 border-b border-gray-700">Gemini Studio Configuration (설정)</h3>
-                    ${await renderInput('cpm_gemini_key', 'API Key (API 키)', 'password')}
+                    ${await renderInput('cpm_gemini_key', 'API Key (API 키 - 여러 개 입력 시 공백/줄바꾼으로 구분, 자동 키회전)', 'password')}
                     ${await renderInput('cpm_dynamic_googleai', '📡 서버에서 모델 목록 불러오기 (Fetch models from API)', 'checkbox')}
                     ${await renderInput('cpm_gemini_thinking_level', 'Thinking Level (생각 수준 - Gemini 3용)', 'select', lists.thinkingList)}
                     ${await renderInput('cpm_gemini_thinking_budget', 'Thinking Budget Tokens (생각 토큰 예산 - Gemini 2.5용, 0은 끄기)', 'number')}
