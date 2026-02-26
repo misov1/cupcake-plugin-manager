@@ -1,5 +1,5 @@
 //@name CPM Provider - Vertex AI
-//@version 1.5.2
+//@version 1.5.3
 //@description Google Vertex AI (Service Account) provider for Cupcake PM (Streaming, Key Rotation)
 //@icon 🔷
 //@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-vertex.js
@@ -238,10 +238,10 @@
                 if (args.presence_penalty !== undefined && args.presence_penalty !== null) body.generationConfig.presencePenalty = args.presence_penalty;
                 if (sys.length > 0) body.systemInstruction = { parts: sys.map(text => ({ text })) };
                 if (typeof CPM.buildGeminiThinkingConfig === 'function') {
-                    const _tc = CPM.buildGeminiThinkingConfig(model, config.thinking, config.thinkingBudget);
+                    const _tc = CPM.buildGeminiThinkingConfig(model, config.thinking, config.thinkingBudget, true);
                     if (_tc) body.generationConfig.thinkingConfig = _tc;
                 } else if (config.thinking && config.thinking !== 'off' && config.thinking !== 'none') {
-                    body.generationConfig.thinkingConfig = { thinkingMode: config.thinking };
+                    body.generationConfig.thinkingConfig = { includeThoughts: true, thinking_level: config.thinking };
                 }
 
                 const res = await fetchFn(url, {

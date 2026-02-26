@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.14.1
+//@version 1.14.2
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.14.1';
+const CPM_VERSION = '1.14.2';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -1062,14 +1062,19 @@ async function inferSlot(activeModelDef) {
  * @param {number|string} [budget] - Explicit token budget (for 2.5 models)
  * @returns {object|null} thinkingConfig object or null if disabled
  */
-function buildGeminiThinkingConfig(model, level, budget) {
+function buildGeminiThinkingConfig(model, level, budget, isVertexAI) {
     const isGemini3 = /gemini-3/i.test(model || '');
     const budgetNum = parseInt(budget) || 0;
 
     if (isGemini3) {
-        // Gemini 3+: thinking mode/level (thinkingMode)
+        // Gemini 3+: thinking level
+        // Vertex AI uses snake_case: thinking_level, Gemini Studio uses camelCase: thinkingLevel (lowercase value)
         if (level && level !== 'off' && level !== 'none') {
-            return { thinkingMode: level };
+            if (isVertexAI) {
+                return { includeThoughts: true, thinking_level: level };
+            } else {
+                return { includeThoughts: true, thinkingLevel: String(level).toLowerCase() };
+            }
         }
         return null;
     }
@@ -1636,7 +1641,7 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
         body.contents = formattedMessages;
         if (systemPrompt) body.systemInstruction = { parts: [{ text: systemPrompt }] };
         body.generationConfig = { temperature: temp, maxOutputTokens: maxTokens };
-        const _thinkCfg = buildGeminiThinkingConfig(config.model, config.thinking_level);
+        const _thinkCfg = buildGeminiThinkingConfig(config.model, config.thinking_level, undefined, false);
         if (_thinkCfg) body.generationConfig.thinkingConfig = _thinkCfg;
         delete body.temperature;
         delete body.max_tokens;
