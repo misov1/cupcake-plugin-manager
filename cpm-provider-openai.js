@@ -1,8 +1,9 @@
-// @name CPM Provider - OpenAI
-// @version 1.5.1
-// @description OpenAI provider for Cupcake PM (Streaming, Key Rotation)
-// @icon 🟢
-// @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-openai.js
+//@name CPM Provider - OpenAI
+//@api 3.0
+//@version 1.5.1
+//@description OpenAI provider for Cupcake PM (Streaming, Key Rotation)
+//@icon 🟢
+//@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-openai.js
 
 (() => {
     const CPM = window.CupcakePM;

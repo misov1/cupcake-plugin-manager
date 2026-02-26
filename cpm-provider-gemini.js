@@ -1,8 +1,9 @@
-// @name CPM Provider - Gemini Studio
-// @version 1.5.0
-// @description Google Gemini Studio (API Key) provider for Cupcake PM (Streaming, Key Rotation)
-// @icon 🔵
-// @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-gemini.js
+//@name CPM Provider - Gemini Studio
+//@api 3.0
+//@version 1.5.0
+//@description Google Gemini Studio (API Key) provider for Cupcake PM (Streaming, Key Rotation)
+//@icon 🔵
+//@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-gemini.js
 
 (() => {
     const CPM = window.CupcakePM;

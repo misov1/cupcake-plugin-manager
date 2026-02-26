@@ -1,8 +1,9 @@
-// @name CPM Provider - OpenRouter
-// @version 1.3.0
-// @description OpenRouter provider for Cupcake PM (Streaming, Key Rotation)
-// @icon 🌐
-// @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-openrouter.js
+//@name CPM Provider - OpenRouter
+//@api 3.0
+//@version 1.3.0
+//@description OpenRouter provider for Cupcake PM (Streaming, Key Rotation)
+//@icon 🌐
+//@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-openrouter.js
 
 (() => {
     const CPM = window.CupcakePM;

@@ -1,8 +1,9 @@
-// @name CPM Provider - Vertex AI
-// @version 1.5.0
-// @description Google Vertex AI (Service Account) provider for Cupcake PM (Streaming, Key Rotation)
-// @icon 🔷
-// @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-vertex.js
+//@name CPM Provider - Vertex AI
+//@api 3.0
+//@version 1.5.0
+//@description Google Vertex AI (Service Account) provider for Cupcake PM (Streaming, Key Rotation)
+//@icon 🔷
+//@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-vertex.js
 
 (() => {
     const CPM = window.CupcakePM;
