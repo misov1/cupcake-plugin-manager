@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.11.2
+//@version 1.13.0
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.11.2';
+const CPM_VERSION = '1.13.0';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -67,6 +67,10 @@ const CPM_VERSION = '1.11.2';
 //@arg chat_gemini_useThoughtSignature string Gemini Use Thought Signature (true/false)
 //@arg chat_gemini_usePlainFetch string Gemini Use Plain Fetch (true/false)
 //@arg common_openai_servicetier string OpenAI Service Tier (Auto, Flex, Default)
+
+// --- Streaming Settings ---
+//@arg cpm_streaming_enabled string Enable Streaming Pass-Through (true/false)
+//@arg cpm_streaming_show_thinking string Show Anthropic Thinking Tokens in Stream (true/false)
 
 // ==========================================
 // 1.5 AWS V4 SIGNER
@@ -327,6 +331,8 @@ async function smartNativeFetch(url, options = {}) {
             // Distinguish real HTTP response (Uint8Array data) from network error (string data)
             if (result && result.data instanceof Uint8Array) {
                 console.log(`[CupcakePM] risuFetch (direct from host) succeeded: status=${result.status} for ${url.substring(0, 60)}`);
+                // NOTE: Strategy 3 creates a one-shot Response (non-streaming body).
+                // SSE parsers will still work, but all data arrives at once rather than incrementally.
                 return new Response(result.data, {
                     status: result.status || 200,
                     headers: new Headers(result.headers || {})
@@ -952,6 +958,12 @@ window.CupcakePM = {
     parseGeminiSSELine,
     collectStream,
     buildGeminiThinkingConfig,
+    /** Check if the V3 iframe bridge can transfer ReadableStream. */
+    isStreamingAvailable: async () => {
+        const enabled = await safeGetBoolArg('cpm_streaming_enabled', false);
+        const capable = await checkStreamCapability();
+        return { enabled, bridgeCapable: capable, active: enabled && capable };
+    },
     safeGetArg,
     safeGetBoolArg,
     setArg: (k, v) => risuai.setArgument(k, String(v)),
@@ -1278,16 +1290,31 @@ function parseOpenAISSELine(line) {
 /**
  * Anthropic SSE parser: extracts delta.text from content_block_delta events.
  * Anthropic SSE format uses "event: ..." + "data: ..." pairs.
+ * Enhanced with thinking/redacted_thinking support (LBI pre-36 reference).
+ * @param {Response} response - fetch Response with streaming body
+ * @param {AbortSignal} [abortSignal] - optional abort signal
+ * @param {Object} [config] - { showThinking: boolean }
  */
-function createAnthropicSSEStream(response, abortSignal) {
+function createAnthropicSSEStream(response, abortSignal, config = {}) {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
     let currentEvent = '';
+    let thinking = false;
+    let showThinkingResolved = false; // lazy-init flag
 
     return new ReadableStream({
         async pull(controller) {
             try {
+                // Lazy-detect showThinking from global setting if caller didn't pass it
+                // (backward compat for sub-plugins calling CPM.createAnthropicSSEStream(res, signal))
+                if (!showThinkingResolved) {
+                    showThinkingResolved = true;
+                    if (config.showThinking === undefined) {
+                        try { config.showThinking = await safeGetBoolArg('cpm_streaming_show_thinking', false); }
+                        catch { config.showThinking = false; }
+                    }
+                }
                 while (true) {
                     if (abortSignal && abortSignal.aborted) {
                         reader.cancel();
@@ -1295,7 +1322,15 @@ function createAnthropicSSEStream(response, abortSignal) {
                         return;
                     }
                     const { done, value } = await reader.read();
-                    if (done) { controller.close(); return; }
+                    if (done) {
+                        // Close any open thinking tag
+                        if (thinking) {
+                            controller.enqueue('\n</Thoughts>\n\n');
+                            thinking = false;
+                        }
+                        controller.close();
+                        return;
+                    }
                     buffer += decoder.decode(value, { stream: true });
                     const lines = buffer.split('\n');
                     buffer = lines.pop() || '';
@@ -1310,8 +1345,45 @@ function createAnthropicSSEStream(response, abortSignal) {
                             const jsonStr = trimmed.slice(5).trim();
                             try {
                                 const obj = JSON.parse(jsonStr);
-                                if (currentEvent === 'content_block_delta' && obj.delta?.text) {
-                                    controller.enqueue(obj.delta.text);
+                                // Handle content_block_delta events
+                                if (currentEvent === 'content_block_delta') {
+                                    let deltaText = '';
+                                    // Thinking delta (Anthropic extended thinking)
+                                    if (obj.delta?.type === 'thinking' || obj.delta?.type === 'thinking_delta') {
+                                        if (config.showThinking && obj.delta.thinking) {
+                                            if (!thinking) {
+                                                thinking = true;
+                                                deltaText += '<Thoughts>\n\n';
+                                            }
+                                            deltaText += obj.delta.thinking;
+                                        }
+                                    }
+                                    // Redacted thinking
+                                    else if (obj.delta?.type === 'redacted_thinking') {
+                                        if (config.showThinking) {
+                                            if (!thinking) {
+                                                thinking = true;
+                                                deltaText += '<Thoughts>\n';
+                                            }
+                                            deltaText += '\n[REDACTED]\n';
+                                        }
+                                    }
+                                    // Regular text delta
+                                    else if (obj.delta?.type === 'text_delta' || obj.delta?.type === 'text') {
+                                        if (obj.delta.text) {
+                                            if (thinking) {
+                                                thinking = false;
+                                                deltaText += '\n</Thoughts>\n\n';
+                                            }
+                                            deltaText += obj.delta.text;
+                                        }
+                                    }
+                                    if (deltaText) controller.enqueue(deltaText);
+                                }
+                                // Handle errors
+                                else if (currentEvent === 'error' || obj.type === 'error') {
+                                    const errMsg = obj.error?.message || obj.message || 'Unknown stream error';
+                                    controller.enqueue(`\n[Stream Error: ${errMsg}]\n`);
                                 }
                             } catch { }
                         }
@@ -1712,7 +1784,8 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
         }
 
         if (format === 'anthropic') {
-            return { success: true, content: createAnthropicSSEStream(res, abortSignal) };
+            const showThinking = await safeGetBoolArg('cpm_streaming_show_thinking', false);
+            return { success: true, content: createAnthropicSSEStream(res, abortSignal, { showThinking }) };
         } else if (format === 'google') {
             return { success: true, content: createSSEStream(res, (line) => parseGeminiSSELine(line, config), abortSignal) };
         } else {
@@ -1838,9 +1911,26 @@ async function handleRequest(args, activeModelDef, abortSignal) {
 
     const result = await fetchByProviderId(targetDef, args, abortSignal);
 
-    // Always collect stream → string (V3 bridge can't reliably transfer ReadableStream)
+    // Streaming pass-through: conditionally return ReadableStream to RisuAI
+    // When enabled AND bridge supports it, RisuAI shows real-time streaming UI.
+    // (Requires factory.ts guest bridge to include ReadableStream in collectTransferables)
     if (result && result.success && result.content instanceof ReadableStream) {
-        result.content = await collectStream(result.content);
+        const streamEnabled = await safeGetBoolArg('cpm_streaming_enabled', false);
+
+        if (streamEnabled) {
+            const bridgeCapable = await checkStreamCapability();
+            if (bridgeCapable) {
+                // Return ReadableStream directly — RisuAI shows real-time streaming UI
+                console.log('[Cupcake PM] ✓ Streaming: returning ReadableStream to RisuAI');
+            } else {
+                // Bridge can't transfer ReadableStream — collect to string as fallback
+                console.warn('[Cupcake PM] ⚠ Streaming enabled but V3 bridge cannot transfer ReadableStream. Falling back to collected string.');
+                result.content = await collectStream(result.content);
+            }
+        } else {
+            // Streaming disabled — always collect to string (original behavior)
+            result.content = await collectStream(result.content);
+        }
     }
 
     return result;
@@ -1901,6 +1991,23 @@ async function handleRequest(args, activeModelDef, abortSignal) {
         const restoredCount = await SettingsBackup.restoreIfEmpty();
         if (restoredCount > 0) {
             console.log(`[CPM] Auto-restored ${restoredCount} settings from persistent backup.`);
+        }
+
+        // ===== Streaming Bridge Capability Check (초기화 시 한 번 실행) =====
+        try {
+            const streamCapable = await checkStreamCapability();
+            const streamEnabled = await safeGetBoolArg('cpm_streaming_enabled', false);
+            if (streamEnabled) {
+                if (streamCapable) {
+                    console.log('[Cupcake PM] 🔄 Streaming: enabled AND bridge capable — ReadableStream pass-through active.');
+                } else {
+                    console.warn('[Cupcake PM] 🔄 Streaming: enabled but bridge NOT capable — will fall back to string collection.');
+                }
+            } else {
+                console.log(`[Cupcake PM] 🔄 Streaming: disabled (bridge ${streamCapable ? 'capable' : 'not capable'}). Enable in settings to activate.`);
+            }
+        } catch (e) {
+            console.warn('[Cupcake PM] Streaming capability check failed:', e.message);
         }
 
         // ===== Dynamic Model Fetching (공식 API에서 모델 목록 자동 갱신) =====
@@ -2185,6 +2292,28 @@ async function handleRequest(args, activeModelDef, abortSignal) {
                             ${await renderInput('cpm_fallback_top_p', 'Default Top P (기본 Top P, 비워두면 API 기본값)', 'number')}
                             ${await renderInput('cpm_fallback_freq_pen', 'Default Frequency Penalty (기본 빈도 페널티, 비워두면 API 기본값)', 'number')}
                             ${await renderInput('cpm_fallback_pres_pen', 'Default Presence Penalty (기본 존재 페널티, 비워두면 API 기본값)', 'number')}
+                        </div>
+
+                        <div class="mt-10 pt-6 border-t border-gray-700">
+                            <h4 class="text-xl font-bold text-emerald-400 mb-4">🔄 스트리밍 설정 (Streaming)</h4>
+                            <div class="bg-gray-800/70 border border-emerald-900/50 rounded-lg p-4 mb-6">
+                                <p class="text-xs text-emerald-300 mb-2 font-semibold">📡 실시간 스트리밍 지원</p>
+                                <p class="text-xs text-gray-400 mb-2">
+                                    활성화하면 API 응답을 ReadableStream으로 RisuAI에 직접 전달하여, RisuAI가 실시간으로 텍스트를 표시할 수 있습니다.<br/>
+                                    현재 V3 플러그인 iframe bridge가 ReadableStream 전송을 지원해야 동작합니다.
+                                </p>
+                                <p class="text-xs text-yellow-500">
+                                    ⚠️ RisuAI factory.ts의 guest bridge에서 ReadableStream이 collectTransferables에 포함되어야 합니다.<br/>
+                                    지원되지 않으면 자동으로 문자열 수집 모드로 폴백됩니다. (LBI pre-36 참조)
+                                </p>
+                                <div id="cpm-stream-status" class="mt-3 text-xs font-mono px-3 py-2 rounded bg-gray-900 border border-gray-600">
+                                    Bridge 상태: 확인 중...
+                                </div>
+                            </div>
+                            <div class="space-y-3">
+                                ${await renderInput('cpm_streaming_enabled', '스트리밍 패스스루 활성화 (Enable Streaming Pass-Through)', 'checkbox')}
+                                ${await renderInput('cpm_streaming_show_thinking', 'Anthropic Thinking 토큰 표시 (Show Thinking in Stream)', 'checkbox')}
+                            </div>
                         </div>
                     </div>
 
@@ -2593,6 +2722,26 @@ async function handleRequest(args, activeModelDef, abortSignal) {
             }));
 
             tabs[0].click();
+
+            // Streaming bridge capability check (async, update UI when done)
+            (async () => {
+                const statusEl = document.getElementById('cpm-stream-status');
+                if (!statusEl) return;
+                try {
+                    const capable = await checkStreamCapability();
+                    if (capable) {
+                        statusEl.innerHTML = '<span class="text-emerald-400">✓ Bridge 지원됨</span> — ReadableStream 전송 가능. 스트리밍 활성화 시 실시간 표시가 동작합니다.';
+                        statusEl.classList.remove('border-gray-600');
+                        statusEl.classList.add('border-emerald-700');
+                    } else {
+                        statusEl.innerHTML = '<span class="text-yellow-400">✗ Bridge 미지원</span> — 현재 V3 bridge가 ReadableStream 전송을 지원하지 않습니다.<br/><span class="text-gray-500">스트리밍을 활성화해도 자동으로 문자열 수집 모드로 폴백됩니다. RisuAI factory.ts 업데이트 대기 중.</span>';
+                        statusEl.classList.remove('border-gray-600');
+                        statusEl.classList.add('border-yellow-800');
+                    }
+                } catch (e) {
+                    statusEl.innerHTML = `<span class="text-red-400">Bridge 확인 실패:</span> ${e.message}`;
+                }
+            })();
 
             // Custom Models Manager Logic
             const cmList = document.getElementById('cpm-cm-list');
