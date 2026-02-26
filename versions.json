@@ -1,42 +1,42 @@
 {
     "CPM Provider - Vertex AI": {
-        "version": "1.5.0",
+        "version": "1.5.1",
         "file": "cpm-provider-vertex.js"
     },
     "CPM Provider - Gemini Studio": {
-        "version": "1.5.0",
+        "version": "1.5.1",
         "file": "cpm-provider-gemini.js"
     },
     "CPM Provider - Anthropic": {
-        "version": "1.6.1",
+        "version": "1.6.2",
         "file": "cpm-provider-anthropic.js"
     },
     "CPM Provider - OpenAI": {
-        "version": "1.5.1",
+        "version": "1.5.2",
         "file": "cpm-provider-openai.js"
     },
     "CPM Provider - DeepSeek": {
-        "version": "1.4.0",
+        "version": "1.4.1",
         "file": "cpm-provider-deepseek.js"
     },
     "CPM Provider - OpenRouter": {
-        "version": "1.3.0",
+        "version": "1.3.1",
         "file": "cpm-provider-openrouter.js"
     },
     "CPM Provider - AWS Bedrock": {
-        "version": "1.4.1",
+        "version": "1.4.2",
         "file": "cpm-provider-aws.js"
     },
     "CPM Component - Chat Input Resizer": {
-        "version": "0.1.9",
+        "version": "0.2.0",
         "file": "cpm-chat-resizer.js"
     },
     "CPM Component - Copilot Token Manager": {
-        "version": "1.5.2",
+        "version": "1.5.3",
         "file": "cpm-copilot-manager.js"
     },
     "CPM Component - Translation Cache Manager": {
-        "version": "1.2.1",
+        "version": "1.2.2",
         "file": "cpm-translation-cache.js"
     }
 }
