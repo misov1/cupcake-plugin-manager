@@ -1,5 +1,5 @@
 //@name CPM Provider - Vertex AI
-//@version 1.5.6
+//@version 1.5.7
 //@description Google Vertex AI (Service Account) provider for Cupcake PM (Streaming, Key Rotation)
 //@icon 🔷
 //@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-vertex.js
@@ -62,7 +62,10 @@
         const sigB64 = btoa(String.fromCharCode(...new Uint8Array(signature))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
         const jwt = `${unsignedToken}.${sigB64}`;
 
-        const res = await Risuai.nativeFetch('https://oauth2.googleapis.com/token', {
+        // Use smartNativeFetch (3-strategy fallback) to avoid V3 iframe bridge
+        // structured clone errors with raw Risuai.nativeFetch
+        const _fetchFn = typeof CPM.smartNativeFetch === 'function' ? CPM.smartNativeFetch : Risuai.nativeFetch;
+        const res = await _fetchFn('https://oauth2.googleapis.com/token', {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
             body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`
