@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.10.14
+//@version 1.10.15
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.10.14';
+const CPM_VERSION = '1.10.15';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -368,13 +368,19 @@ async function smartNativeFetch(url, options = {}) {
             proxyErrorResponse = res; // Save for fallback
             // Fall through to Strategy 3
         } else if (!res.ok && res.status === 400) {
-            // ── Null-message corruption detection ──
+            // ── Detect proxy-related 400 errors that Strategy 3 (direct) might bypass ──
             let errText = '';
             try { errText = await res.clone().text(); } catch {}
             const isNullMessageError = errText.includes('got null instead') && errText.includes('messages');
-            if (isNullMessageError) {
-                console.warn(`[CupcakePM] ⚠️ Null-message error from proxy route (400). Trying direct fetch...`);
+            // Google AI Studio returns 400 FAILED_PRECONDITION for unsupported regions.
+            // The proxy server may be in a restricted region while the user's real IP is not
+            // (e.g., user has VPN). Fall through to Strategy 3 which uses the user's real IP.
+            const isLocationError = errText.includes('User location is not supported') || errText.includes('FAILED_PRECONDITION');
+            if (isNullMessageError || isLocationError) {
+                const reason = isNullMessageError ? 'null-message corruption' : 'region/location restriction';
+                console.warn(`[CupcakePM] ⚠️ Proxy 400 (${reason}). Trying direct fetch from host...`);
                 console.warn(`[CupcakePM] ↳ Error: ${errText.substring(0, 300)}`);
+                proxyErrorResponse = res; // Save for fallback
                 // Fall through to Strategy 3
             } else {
                 return res;
