@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.14.8
+//@version 1.14.9
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.14.8';
+const CPM_VERSION = '1.14.9';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -267,8 +267,11 @@ async function smartNativeFetch(url, options = {}) {
             // The proxy server may be in a restricted region while the user's real IP is not
             // (e.g., user has VPN). Fall through to Strategy 3 which uses the user's real IP.
             const isLocationError = errText.includes('User location is not supported') || errText.includes('FAILED_PRECONDITION');
-            if (isNullMessageError || isLocationError) {
-                const reason = isNullMessageError ? 'null-message corruption' : 'region/location restriction';
+            // Proxy may corrupt/truncate larger JSON bodies → API returns "not valid JSON".
+            // Strategy 3 (direct from host) bypasses proxy entirely, avoiding body corruption.
+            const isInvalidJsonError = errText.includes('not valid JSON') || errText.includes('invalid_request_body') || errText.includes('Could not parse');
+            if (isNullMessageError || isLocationError || isInvalidJsonError) {
+                const reason = isNullMessageError ? 'null-message corruption' : isLocationError ? 'region/location restriction' : 'invalid JSON (possible proxy body corruption)';
                 console.warn(`[CupcakePM] ⚠️ Proxy 400 (${reason}). Trying direct fetch from host...`);
                 console.warn(`[CupcakePM] ↳ Error: ${errText.substring(0, 300)}`);
                 proxyErrorResponse = res; // Save for fallback
@@ -958,10 +961,17 @@ const KeyPool = {
     /**
      * Parse keys from the setting string (whitespace-separated), cache them,
      * and return a random key from the pool.
+     * For inline pools (seeded manually via _pools), skip safeGetArg to avoid
+     * overwriting the seeded pool with an empty string.
      */
     async pick(argName) {
-        const raw = await safeGetArg(argName);
         const pool = this._pools[argName];
+        // If pool was manually seeded (inline custom models) and still has keys,
+        // skip safeGetArg — the argName doesn't exist in @arg settings.
+        if (pool && pool._inline && pool.keys.length > 0) {
+            return pool.keys[Math.floor(Math.random() * pool.keys.length)];
+        }
+        const raw = await safeGetArg(argName);
         if (!pool || pool.lastRaw !== raw || pool.keys.length === 0) {
             this._pools[argName] = {
                 lastRaw: raw,
@@ -2073,7 +2083,8 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
         // Seed the pool manually (custom models store keys inline, not in @arg fields)
         KeyPool._pools[_rotationPoolName] = {
             lastRaw: _rawKeys,
-            keys: [..._keyPool]
+            keys: [..._keyPool],
+            _inline: true  // Flag: skip safeGetArg in pick() — this argName doesn't exist in settings
         };
         return KeyPool.withRotation(_rotationPoolName, _doCustomFetch);
     }
