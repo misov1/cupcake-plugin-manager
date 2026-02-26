@@ -1,5 +1,4 @@
 //@name CPM Provider - OpenAI
-//@api 3.0
 //@version 1.5.1
 //@description OpenAI provider for Cupcake PM (Streaming, Key Rotation)
 //@icon 🟢

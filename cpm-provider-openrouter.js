@@ -1,5 +1,4 @@
 //@name CPM Provider - OpenRouter
-//@api 3.0
 //@version 1.3.0
 //@description OpenRouter provider for Cupcake PM (Streaming, Key Rotation)
 //@icon 🌐

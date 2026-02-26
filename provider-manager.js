@@ -129,8 +129,7 @@ async function isDynamicFetchEnabled(providerName) {
 
 /**
  * Strip RisuAI-internal tags from message content.
- * LBI pre31 stripped {{inlay::...}} and <qak> tags before sending;
- * V3 plugins must do the same to avoid leaking internal markup to API.
+ * {{inlay::...}} and <qak> are RisuAI-internal markup that must not leak to API.
  */
 function stripInternalTags(text) {
     if (typeof text !== 'string') return text;
@@ -765,7 +764,7 @@ const SubPluginManager = {
 // KEY ROTATION (키 회전)
 // ==========================================
 /**
- * KeyPool: LBI-style key rotation. Keys are whitespace-separated in //@arg fields.
+ * KeyPool: key rotation. Keys are whitespace-separated in //@arg fields.
  * Random pick per request; on 429/529/503, drain failed key and retry.
  */
 const KeyPool = {
@@ -1121,7 +1120,7 @@ function formatToOpenAI(messages, config = {}) {
         const msg = { role, content: '' };
         // altrole: convert assistant→model for Gemini-style APIs (only when explicitly requested)
         if (config.altrole && msg.role === 'assistant') msg.role = 'model';
-        // Handle multimodals (images/audio) → OpenAI vision format (like LBI pre31)
+        // Handle multimodals (images/audio) → OpenAI vision format
         if (m.multimodals && Array.isArray(m.multimodals) && m.multimodals.length > 0) {
             const contentParts = [];
             const textContent = typeof m.content === 'string' ? m.content.trim() : String(m.content ?? '').trim();
@@ -2175,6 +2174,11 @@ async function handleRequest(args, activeModelDef, abortSignal) {
                     <div class="h-14 flex items-center justify-between px-6 border-b border-gray-700 md:border-none cursor-pointer md:cursor-default" id="cpm-mobile-menu-btn">
                         <h2 class="text-lg font-extrabold bg-gradient-to-r from-blue-400 to-purple-500 text-transparent bg-clip-text">🧁 Cupcake PM v${CPM_VERSION}</h2>
                         <span class="md:hidden text-gray-400 text-xl" id="cpm-mobile-icon">▼</span>
+                    </div>
+                    <div class="hidden md:flex items-center gap-3 px-5 py-1.5 border-b border-gray-700/50">
+                        <span class="text-[10px] text-gray-500">⌨️ <kbd class="px-1 py-0.5 bg-gray-800 border border-gray-600 rounded text-[10px] text-gray-400">Ctrl</kbd>+<kbd class="px-1 py-0.5 bg-gray-800 border border-gray-600 rounded text-[10px] text-gray-400">Shift</kbd>+<kbd class="px-1 py-0.5 bg-gray-800 border border-gray-600 rounded text-[10px] text-gray-400">Alt</kbd>+<kbd class="px-1 py-0.5 bg-gray-800 border border-gray-600 rounded text-[10px] text-gray-400">P</kbd></span>
+                        <span class="text-[10px] text-gray-600">|</span>
+                        <span class="text-[10px] text-gray-500">📱 4손가락 터치</span>
                     </div>
                     
                     <div id="cpm-mobile-dropdown" class="hidden md:flex flex-col absolute md:static top-full left-0 w-full md:w-auto bg-gray-900 border-b border-gray-700 md:border-none shadow-xl md:shadow-none z-[100] h-auto max-h-[70vh] md:max-h-none md:h-full overflow-hidden flex-1">
