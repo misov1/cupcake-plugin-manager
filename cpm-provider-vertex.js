@@ -1,6 +1,6 @@
 //@name CPM Provider - Vertex AI
-//@version 1.5.5
-//@description Google Vertex AI (Service Account) provider for Cupcake PM (Streaming, Key Rotation, Thought Signature)
+//@version 1.5.6
+//@description Google Vertex AI (Service Account) provider for Cupcake PM (Streaming, Key Rotation)
 //@icon 🔷
 //@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-vertex.js
 
@@ -178,12 +178,6 @@
                 useThoughtSignature: await CPM.safeGetBoolArg('chat_vertex_useThoughtSignature'),
             };
 
-            // Pre-load thought signature cache for injection into model parts
-            if (config.useThoughtSignature && typeof CPM.loadSignatureCache === 'function') {
-                try { config._signatureCache = await CPM.loadSignatureCache(); }
-                catch { config._signatureCache = {}; }
-            }
-
             // Key Rotation: wrap all fetch logic in doFetch(keyJson) for automatic credential rotation
             const doFetch = async (keyJson) => {
                 if (!keyJson) return { success: false, content: '[Vertex] No Service Account JSON key provided.' };
@@ -259,9 +253,7 @@
                     if (res.status === 401 || res.status === 403) invalidateTokenCache(keyJson);
                     return { success: false, content: `[Vertex Error ${res.status}] ${await res.text()}`, _status: res.status };
                 }
-                const _onComplete = config.useThoughtSignature && typeof CPM.saveThoughtSignatureFromStream === 'function'
-                    ? () => CPM.saveThoughtSignatureFromStream(config) : undefined;
-                return { success: true, content: CPM.createSSEStream(res, (line) => CPM.parseGeminiSSELine(line, config), abortSignal, _onComplete) };
+                return { success: true, content: CPM.createSSEStream(res, (line) => CPM.parseGeminiSSELine(line, config), abortSignal) };
             };
 
             // Use JSON key rotation if available, otherwise fall back to single key
