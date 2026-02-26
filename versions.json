@@ -20,7 +20,7 @@
         "file": "cpm-provider-deepseek.js"
     },
     "CPM Provider - OpenRouter": {
-        "version": "1.2.0",
+        "version": "1.2.1",
         "file": "cpm-provider-openrouter.js"
     },
     "CPM Provider - AWS Bedrock": {
@@ -28,11 +28,11 @@
         "file": "cpm-provider-aws.js"
     },
     "CPM Component - Chat Input Resizer": {
-        "version": "0.1.6",
+        "version": "0.1.7",
         "file": "cpm-chat-resizer.js"
     },
     "CPM Component - Copilot Token Manager": {
-        "version": "1.5.0",
+        "version": "1.5.1",
         "file": "cpm-copilot-manager.js"
     },
     "CPM Component - Translation Cache Manager": {

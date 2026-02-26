@@ -1,7 +1,7 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.10.15
+//@version 1.10.16
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
 const CPM_VERSION = '1.10.15';
@@ -2075,6 +2075,9 @@ async function handleRequest(args, activeModelDef, abortSignal) {
                 SettingsBackup.updateKey(k, String(v));
             };
 
+            // HTML-escape helper for attribute values
+            const escAttr = (s) => String(s ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
             const renderInput = async (id, label, type = 'text', opts = []) => {
                 let html = `<div class="mb-4">`;
                 if (type === 'checkbox') {
@@ -2087,16 +2090,16 @@ async function handleRequest(args, activeModelDef, abortSignal) {
                     const val = await getVal(id);
                     html += `<label class="block text-sm font-medium text-gray-400 mb-1">${label}</label>`;
                     html += `<select id="${id}" class="w-full bg-gray-800 border border-gray-600 rounded px-3 py-2 text-white focus:outline-none focus:border-blue-500">`;
-                    opts.forEach(o => html += `<option value="${o.value}" ${val === o.value ? 'selected' : ''}>${o.text}</option>`);
+                    opts.forEach(o => html += `<option value="${escAttr(o.value)}" ${val === o.value ? 'selected' : ''}>${escAttr(o.text)}</option>`);
                     html += `</select></div>`;
                 } else if (type === 'textarea') {
                     const val = await getVal(id);
                     html += `<label class="block text-sm font-medium text-gray-400 mb-1">${label}</label>`;
-                    html += `<textarea id="${id}" class="w-full bg-gray-800 border border-gray-600 rounded px-3 py-2 text-white focus:outline-none focus:border-blue-500 h-24" spellcheck="false">${val}</textarea></div>`;
+                    html += `<textarea id="${id}" class="w-full bg-gray-800 border border-gray-600 rounded px-3 py-2 text-white focus:outline-none focus:border-blue-500 h-24" spellcheck="false">${escAttr(val)}</textarea></div>`;
                 } else {
                     const val = await getVal(id);
                     html += `<label class="block text-sm font-medium text-gray-400 mb-1">${label}</label>`;
-                    html += `<input id="${id}" type="${type}" value="${val}" class="w-full bg-gray-800 border border-gray-600 rounded px-3 py-2 text-white focus:outline-none focus:border-blue-500"></div>`;
+                    html += `<input id="${id}" type="${type}" value="${escAttr(val)}" class="w-full bg-gray-800 border border-gray-600 rounded px-3 py-2 text-white focus:outline-none focus:border-blue-500"></div>`;
                 }
                 return html;
             };
@@ -2584,7 +2587,6 @@ async function handleRequest(args, activeModelDef, abortSignal) {
             const getActualId = (e) => e.target.id;
 
             content.querySelectorAll('input[type="text"], input[type="password"], input[type="number"], select, textarea').forEach(el => {
-                el.addEventListener('change', (e) => setVal(getActualId(e), e.target.value));
                 el.addEventListener('change', (e) => setVal(getActualId(e), e.target.value));
             });
 

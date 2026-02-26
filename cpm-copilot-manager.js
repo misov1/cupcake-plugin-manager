@@ -1,7 +1,7 @@
 //@name CPM Component - Copilot Token Manager
 //@display-name Cupcake Copilot Manager
 //@api 3.0
-//@version 1.5.0
+//@version 1.5.1
 //@author Cupcake
 //@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-copilot-manager.js
 
@@ -180,7 +180,7 @@
         // --- OAuth endpoints (github.com/login/*) → must use proxy (no CORS) ---
         if (url.includes('github.com/login/')) {
             try {
-                console.log(LOG_TAG, `risuFetch [proxy/OAuth] for ${url.substring(0, 80)}...`);
+                console.debug(LOG_TAG, `risuFetch [proxy/OAuth] for ${url.substring(0, 80)}...`);
                 const result = await Risu.risuFetch(url, {
                     method,
                     headers,
@@ -188,7 +188,7 @@
                     rawResponse: false,
                     plainFetchDeforce: true,
                 });
-                console.log(LOG_TAG, `risuFetch [proxy] ok=${result.ok}, status=${result.status}`);
+                console.debug(LOG_TAG, `risuFetch [proxy] ok=${result.ok}, status=${result.status}`);
                 return wrapRisuFetchResult(result);
             } catch (e) {
                 console.error(LOG_TAG, 'risuFetch [proxy/OAuth] failed:', e.message);
@@ -199,7 +199,7 @@
         // --- API endpoints (api.github.com, api.githubcopilot.com) ---
         // Strategy 1: Direct fetch via plainFetchForce (bypasses proxy, uses CORS)
         try {
-            console.log(LOG_TAG, `risuFetch [direct] for ${url.substring(0, 80)}...`);
+            console.debug(LOG_TAG, `risuFetch [direct] for ${url.substring(0, 80)}...`);
             const result = await Risu.risuFetch(url, {
                 method,
                 headers,
@@ -208,21 +208,21 @@
                 plainFetchForce: true,
             });
             if (isRealHttpResponse(result)) {
-                console.log(LOG_TAG, `risuFetch [direct] ok=${result.ok}, status=${result.status}`);
+                console.debug(LOG_TAG, `risuFetch [direct] ok=${result.ok}, status=${result.status}`);
                 if (!result.ok && result.status === 401) {
                     const errDetail = typeof result.data === 'string' ? result.data.substring(0, 200) : JSON.stringify(result.data);
                     console.warn(LOG_TAG, `401 응답 상세: ${errDetail}`);
                 }
                 return wrapRisuFetchResult(result);
             }
-            console.log(LOG_TAG, `risuFetch [direct] not a real HTTP response:`, typeof result.data === 'string' ? result.data.substring(0, 150) : 'unknown');
+            console.debug(LOG_TAG, `risuFetch [direct] not a real HTTP response:`, typeof result.data === 'string' ? result.data.substring(0, 150) : 'unknown');
         } catch (e) {
-            console.log(LOG_TAG, 'risuFetch [direct] exception:', e.message);
+            console.debug(LOG_TAG, 'risuFetch [direct] exception:', e.message);
         }
 
         // Strategy 2: Proxy via plainFetchDeforce (for Tauri/desktop or if CORS fails)
         try {
-            console.log(LOG_TAG, `risuFetch [proxy] for ${url.substring(0, 80)}...`);
+            console.debug(LOG_TAG, `risuFetch [proxy] for ${url.substring(0, 80)}...`);
             const result = await Risu.risuFetch(url, {
                 method,
                 headers,
@@ -231,21 +231,21 @@
                 plainFetchDeforce: true,
             });
             if (isRealHttpResponse(result)) {
-                console.log(LOG_TAG, `risuFetch [proxy] ok=${result.ok}, status=${result.status}`);
+                console.debug(LOG_TAG, `risuFetch [proxy] ok=${result.ok}, status=${result.status}`);
                 if (!result.ok && result.status === 401) {
                     const errDetail = typeof result.data === 'string' ? result.data.substring(0, 200) : JSON.stringify(result.data);
                     console.warn(LOG_TAG, `401 [proxy] 응답 상세: ${errDetail}`);
                 }
                 return wrapRisuFetchResult(result);
             }
-            console.log(LOG_TAG, `risuFetch [proxy] not a real HTTP response:`, typeof result.data === 'string' ? result.data.substring(0, 150) : 'unknown');
+            console.debug(LOG_TAG, `risuFetch [proxy] not a real HTTP response:`, typeof result.data === 'string' ? result.data.substring(0, 150) : 'unknown');
         } catch (e) {
-            console.log(LOG_TAG, 'risuFetch [proxy] exception:', e.message);
+            console.debug(LOG_TAG, 'risuFetch [proxy] exception:', e.message);
         }
 
         // Strategy 3: nativeFetch as last resort (uses proxy on web, native on Tauri)
         try {
-            console.log(LOG_TAG, `nativeFetch for ${url.substring(0, 80)}...`);
+            console.debug(LOG_TAG, `nativeFetch for ${url.substring(0, 80)}...`);
             const res = await Risu.nativeFetch(url, {
                 method,
                 headers,
@@ -253,7 +253,7 @@
             });
             return res;
         } catch (e) {
-            console.log(LOG_TAG, 'nativeFetch exception:', e.message);
+            console.debug(LOG_TAG, 'nativeFetch exception:', e.message);
         }
 
         throw new Error('네트워크 요청 실패: 모든 요청 방식이 실패했습니다. RisuAI 데스크탑 앱을 사용하거나, RisuAI 설정 → 기타 봇 설정 → "Use plain fetch instead of server"를 활성화하세요.');
@@ -348,7 +348,7 @@
         //    This is the correct endpoint for quota_snapshots (premium_interactions, chat, completions)
         //    Reference: copilotstats.com uses this same endpoint
         try {
-            console.log(LOG_TAG, 'Fetching Copilot quota via /copilot_internal/user...');
+            console.debug(LOG_TAG, 'Fetching Copilot quota via /copilot_internal/user...');
             const userRes = await copilotFetch('https://api.github.com/copilot_internal/user', {
                 method: 'GET',
                 headers: {
@@ -364,7 +364,7 @@
                 if (userData.quota_snapshots) {
                     quotaInfo.quota_snapshots = userData.quota_snapshots;
                 }
-                console.log(LOG_TAG, 'Copilot user data retrieved successfully.');
+                console.debug(LOG_TAG, 'Copilot user data retrieved successfully.');
             } else {
                 console.warn(LOG_TAG, `copilot_internal/user returned ${userRes.status}`);
             }
@@ -808,5 +808,5 @@
         }
     });
 
-    console.log(`${LOG_TAG} Settings tab registered (v1.5.0) — sidebar: 🔑 Copilot`);
+    console.debug(`${LOG_TAG} Settings tab registered (v1.5.1) — sidebar: 🔑 Copilot`);
 })();
