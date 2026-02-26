@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.14.6
+//@version 1.14.7
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.14.6';
+const CPM_VERSION = '1.14.7';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -663,6 +663,7 @@ const SubPluginManager = {
     async showUpdateToast(updates) {
         try {
             // getRootDocument returns SafeElement proxies — must use async SafeElement API
+            // Pattern follows LBI PluginToastUI: individual setStyle() calls, not setStyleAttribute()
             const doc = await risuai.getRootDocument();
             if (!doc) {
                 console.debug('[CPM Toast] getRootDocument returned null');
@@ -670,8 +671,10 @@ const SubPluginManager = {
             }
 
             // Remove previous toast if exists
-            const existing = await doc.querySelector('[x-cpm-update-toast]');
-            if (existing) await existing.remove();
+            const existing = await doc.querySelector('[x-cpm-toast]');
+            if (existing) {
+                try { await existing.remove(); } catch (_) {}
+            }
 
             const count = updates.length;
             // Build change summary HTML (max 3 items)
@@ -680,50 +683,54 @@ const SubPluginManager = {
             for (let i = 0; i < showMax; i++) {
                 const u = updates[i];
                 const changeText = u.changes ? ` — ${u.changes}` : '';
-                detailLines += `<div style="font-size:11px;color:#9ca3af;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:320px;">${u.icon} ${u.name} <span style="color:#6ee7b7;">${u.localVersion} → ${u.remoteVersion}</span>${changeText}</div>`;
+                detailLines += `<div style="font-size:11px;color:#9ca3af;margin-top:2px">${u.icon} ${u.name} <span style="color:#6ee7b7">${u.localVersion} → ${u.remoteVersion}</span>${changeText}</div>`;
             }
             if (count > showMax) {
-                detailLines += `<div style="font-size:11px;color:#6b7280;margin-top:2px;">...외 ${count - showMax}개</div>`;
+                detailLines += `<div style="font-size:11px;color:#6b7280;margin-top:2px">...외 ${count - showMax}개</div>`;
             }
 
-            // Create toast container via SafeElement API
+            // Create toast via SafeElement — use individual setStyle() like LBI
             const toast = await doc.createElement('div');
-            await toast.setAttribute('x-cpm-update-toast', '1');
-            await toast.setStyleAttribute(`
-                position: fixed;
-                bottom: 20px;
-                right: 20px;
-                background: #1f2937;
-                border: 1px solid #374151;
-                border-left: 3px solid #3b82f6;
-                border-radius: 10px;
-                padding: 12px 14px;
-                max-width: 380px;
-                min-width: 280px;
-                box-shadow: 0 8px 24px rgba(0,0,0,0.4);
-                z-index: 99998;
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-                opacity: 0;
-                transform: translateY(12px);
-                transition: opacity 0.3s ease, transform 0.3s ease;
-                pointer-events: auto;
-            `);
+            await toast.setAttribute('x-cpm-toast', '1');
+            await toast.setStyle('position', 'fixed');
+            await toast.setStyle('bottom', '20px');
+            await toast.setStyle('right', '20px');
+            await toast.setStyle('zIndex', '99998');
+            await toast.setStyle('background', '#1f2937');
+            await toast.setStyle('border', '1px solid #374151');
+            await toast.setStyle('borderLeft', '3px solid #3b82f6');
+            await toast.setStyle('borderRadius', '10px');
+            await toast.setStyle('padding', '12px 14px');
+            await toast.setStyle('maxWidth', '380px');
+            await toast.setStyle('minWidth', '280px');
+            await toast.setStyle('boxShadow', '0 8px 24px rgba(0,0,0,0.4)');
+            await toast.setStyle('fontFamily', "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif");
+            await toast.setStyle('pointerEvents', 'auto');
+            await toast.setStyle('opacity', '0');
+            await toast.setStyle('transform', 'translateY(12px)');
+            await toast.setStyle('transition', 'opacity 0.3s ease, transform 0.3s ease');
+
             await toast.setInnerHTML(`
-                <div style="display:flex;align-items:flex-start;gap:10px;">
-                    <div style="font-size:20px;line-height:1;flex-shrink:0;">🧁</div>
-                    <div style="flex:1;min-width:0;">
-                        <div style="font-size:13px;font-weight:600;color:#e5e7eb;">서브 플러그인 업데이트 ${count}개 있음</div>
+                <div style="display:flex;align-items:flex-start;gap:10px">
+                    <div style="font-size:20px;line-height:1;flex-shrink:0">🧁</div>
+                    <div style="flex:1;min-width:0">
+                        <div style="font-size:13px;font-weight:600;color:#e5e7eb">서브 플러그인 업데이트 ${count}개 있음</div>
                         ${detailLines}
-                        <div style="font-size:11px;color:#6b7280;margin-top:4px;">설정 → 서브 플러그인 탭에서 업데이트하세요</div>
+                        <div style="font-size:11px;color:#6b7280;margin-top:4px">설정 → 서브 플러그인 탭에서 업데이트하세요</div>
                     </div>
                 </div>
             `);
 
-            // Append to body
             const body = await doc.querySelector('body');
-            if (body) await body.appendChild(toast);
+            if (body) {
+                await body.appendChild(toast);
+                console.log('[CPM Toast] Toast appended to root body');
+            } else {
+                console.debug('[CPM Toast] body not found');
+                return;
+            }
 
-            // Animate in after brief delay
+            // Animate in
             setTimeout(async () => {
                 try {
                     await toast.setStyle('opacity', '1');
@@ -731,7 +738,7 @@ const SubPluginManager = {
                 } catch (_) {}
             }, 50);
 
-            // Auto-dismiss after 8 seconds (fade out then remove)
+            // Auto-dismiss after 8 seconds
             setTimeout(async () => {
                 try {
                     await toast.setStyle('opacity', '0');
