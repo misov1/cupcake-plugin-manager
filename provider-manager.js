@@ -23,28 +23,43 @@ const CPM_VERSION = '1.15.0';
 //@arg cpm_openai_model string OpenAI Model
 //@arg cpm_openai_reasoning string OpenAI Reasoning Effort (none, low, medium, high)
 //@arg cpm_openai_verbosity string OpenAI Verbosity (none, low, medium, high)
+//@arg cpm_dynamic_openai string Dynamic OpenAI Model Fetch (true/false)
 // Anthropic
 //@arg cpm_anthropic_url string Anthropic Base URL
 //@arg cpm_anthropic_key string Anthropic API Key
 //@arg cpm_anthropic_model string Anthropic Model
 //@arg cpm_anthropic_thinking_budget int Anthropic Thinking Budget
+//@arg cpm_anthropic_thinking_effort string Anthropic Thinking Effort (none/low/medium/high)
+//@arg cpm_dynamic_anthropic string Dynamic Anthropic Model Fetch (true/false)
 // Gemini
 //@arg cpm_gemini_key string Gemini API Key
 //@arg cpm_gemini_model string Gemini Model
 //@arg cpm_gemini_thinking_level string Gemini Thinking Level (off, MINIMAL, LOW, MEDIUM, HIGH)
+//@arg cpm_gemini_thinking_budget int Gemini Thinking Budget
+//@arg cpm_dynamic_googleai string Dynamic Gemini Model Fetch (true/false)
 // Vertex
 //@arg cpm_vertex_key_json string Vertex Service Account JSON
 //@arg cpm_vertex_location string Vertex Location (e.g. us-central1, global)
 //@arg cpm_vertex_model string Vertex Model
 //@arg cpm_vertex_thinking_level string Vertex Thinking Level (off, MINIMAL, LOW, MEDIUM, HIGH)
+//@arg cpm_vertex_thinking_budget int Vertex Gemini Thinking Budget
+//@arg cpm_vertex_claude_thinking_budget int Vertex Claude Thinking Budget
+//@arg chat_vertex_preserveSystem string Vertex Preserve System Prompt (true/false)
+//@arg chat_vertex_showThoughtsToken string Vertex Show Thoughts Token (true/false)
+//@arg chat_vertex_useThoughtSignature string Vertex Use Thought Signature (true/false)
+//@arg cpm_dynamic_vertexai string Dynamic Vertex Model Fetch (true/false)
 // AWS Bedrock
 //@arg cpm_aws_key string AWS Access Key
 //@arg cpm_aws_secret string AWS Secret Access Key
 //@arg cpm_aws_region string AWS Region
+//@arg cpm_aws_thinking_budget int AWS Thinking Budget
+//@arg cpm_aws_thinking_effort string AWS Thinking Effort (none/low/medium/high)
+//@arg cpm_dynamic_aws string Dynamic AWS Model Fetch (true/false)
 // DeepSeek
 //@arg cpm_deepseek_url string DeepSeek Base URL
 //@arg cpm_deepseek_key string DeepSeek API Key
 //@arg cpm_deepseek_model string DeepSeek Model
+//@arg cpm_dynamic_deepseek string Dynamic DeepSeek Model Fetch (true/false)
 // OpenRouter
 //@arg cpm_openrouter_url string OpenRouter Base URL
 //@arg cpm_openrouter_key string OpenRouter API Key
@@ -147,9 +162,9 @@ function stripInternalTags(text) {
  * Catches nulls from toJSON(), undefined→null conversion, etc.
  */
 function safeStringify(obj) {
-    return JSON.stringify(obj, function(_key, value) {
+    return JSON.stringify(obj, function (_key, value) {
         if (Array.isArray(value)) {
-            return value.filter(function(item) { return item != null; });
+            return value.filter(function (item) { return item != null; });
         }
         return value;
     });
@@ -350,14 +365,14 @@ async function smartNativeFetch(url, options = {}) {
         // Strategy 3 uses the user's real IP, bypassing proxy restrictions.
         if (!res.ok && (res.status === 403 || res.status === 502 || res.status === 503)) {
             let errText = '';
-            try { errText = await res.clone().text(); } catch {}
+            try { errText = await res.clone().text(); } catch { }
             console.log(`[CupcakePM] nativeFetch proxy error (${res.status}), trying risuFetch direct...`);
             proxyErrorResponse = res; // Save for fallback
             // Fall through to Strategy 3
         } else if (!res.ok && res.status === 400) {
             // ── Detect proxy-related 400 errors that Strategy 3 (direct) might bypass ──
             let errText = '';
-            try { errText = await res.clone().text(); } catch {}
+            try { errText = await res.clone().text(); } catch { }
             const isNullMessageError = errText.includes('got null instead') && errText.includes('messages');
             // Google AI Studio returns 400 FAILED_PRECONDITION for unsupported regions.
             // The proxy server may be in a restricted region while the user's real IP is not
@@ -417,7 +432,7 @@ async function smartNativeFetch(url, options = {}) {
                     }
                 }
                 if (Array.isArray(bodyObj.contents)) {
-                    try { bodyObj.contents = JSON.parse(JSON.stringify(bodyObj.contents)); } catch (_) {}
+                    try { bodyObj.contents = JSON.parse(JSON.stringify(bodyObj.contents)); } catch (_) { }
                     bodyObj.contents = bodyObj.contents.filter(m => m != null && typeof m === 'object');
                 }
             }
@@ -772,7 +787,7 @@ const SubPluginManager = {
             // Remove previous toast if exists
             const existing = await doc.querySelector('[x-cpm-toast]');
             if (existing) {
-                try { await existing.remove(); } catch (_) {}
+                try { await existing.remove(); } catch (_) { }
             }
 
             const count = updates.length;
@@ -834,7 +849,7 @@ const SubPluginManager = {
                 try {
                     await toast.setStyle('opacity', '1');
                     await toast.setStyle('transform', 'translateY(0)');
-                } catch (_) {}
+                } catch (_) { }
             }, 50);
 
             // Auto-dismiss after 8 seconds
@@ -843,9 +858,9 @@ const SubPluginManager = {
                     await toast.setStyle('opacity', '0');
                     await toast.setStyle('transform', 'translateY(12px)');
                     setTimeout(async () => {
-                        try { await toast.remove(); } catch (_) {}
+                        try { await toast.remove(); } catch (_) { }
                     }, 350);
-                } catch (_) {}
+                } catch (_) { }
             }, 8000);
         } catch (e) {
             console.debug('[CPM Toast] Failed to show toast:', e.message);
@@ -1149,19 +1164,19 @@ const KeyPool = {
         try {
             const arr = JSON.parse(trimmed);
             if (Array.isArray(arr)) return arr.filter(o => o && typeof o === 'object').map(o => JSON.stringify(o));
-        } catch (_) {}
+        } catch (_) { }
         // 2. Try wrapping in brackets: {...},{...} → [{...},{...}]
         if (trimmed.startsWith('{')) {
             try {
                 const arr = JSON.parse('[' + trimmed + ']');
                 if (Array.isArray(arr)) return arr.filter(o => o && typeof o === 'object').map(o => JSON.stringify(o));
-            } catch (_) {}
+            } catch (_) { }
         }
         // 3. Try as single JSON object
         try {
             const obj = JSON.parse(trimmed);
             if (obj && typeof obj === 'object' && !Array.isArray(obj)) return [trimmed];
-        } catch (_) {}
+        } catch (_) { }
         return [];
     },
 
@@ -1557,7 +1572,7 @@ function createSSEStream(response, lineParser, abortSignal, onComplete) {
                 while (true) {
                     if (abortSignal && abortSignal.aborted) {
                         reader.cancel();
-                        if (typeof onComplete === 'function') try { onComplete(); } catch {}
+                        if (typeof onComplete === 'function') try { onComplete(); } catch { }
                         controller.close();
                         return;
                     }
@@ -1568,7 +1583,7 @@ function createSSEStream(response, lineParser, abortSignal, onComplete) {
                             const delta = lineParser(buffer.trim());
                             if (delta) controller.enqueue(delta);
                         }
-                        if (typeof onComplete === 'function') try { onComplete(); } catch {}
+                        if (typeof onComplete === 'function') try { onComplete(); } catch { }
                         controller.close();
                         return;
                     }
@@ -1584,10 +1599,10 @@ function createSSEStream(response, lineParser, abortSignal, onComplete) {
                 }
             } catch (e) {
                 if (e.name !== 'AbortError') {
-                    if (typeof onComplete === 'function') try { onComplete(); } catch {}
+                    if (typeof onComplete === 'function') try { onComplete(); } catch { }
                     controller.error(e);
                 } else {
-                    if (typeof onComplete === 'function') try { onComplete(); } catch {}
+                    if (typeof onComplete === 'function') try { onComplete(); } catch { }
                     controller.close();
                 }
             }
@@ -2073,82 +2088,126 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
     // --- Wrap core fetch logic to support key rotation ---
     const _doCustomFetch = async (_apiKey) => {
 
-    const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${_apiKey}` };
-    // Copilot auto-detection: if URL is githubcopilot.com, auto-fetch API token + attach Copilot headers
-    if (effectiveUrl && effectiveUrl.includes('githubcopilot.com')) {
-        // Auto-fetch Copilot API token (exchanges stored GitHub OAuth token for short-lived API token)
-        let copilotApiToken = config.copilotToken || '';
-        if (!copilotApiToken) {
-            copilotApiToken = await ensureCopilotApiToken();
-        }
-        if (copilotApiToken) {
-            headers['Authorization'] = `Bearer ${copilotApiToken}`;
-        } else {
-            console.warn('[Cupcake PM] Copilot: No API token available. Request may fail auth. Set token via Copilot Manager (🔑 탭).');
-        }
-        // Required Copilot headers (from cpm-copilot-manager & VS Code Copilot extension)
-        headers['Copilot-Integration-Id'] = 'vscode-chat';
-        headers['X-Request-Id'] = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString();
-        headers['Editor-Version'] = 'vscode/1.109.2';
-        headers['Editor-Plugin-Version'] = 'copilot-chat/0.37.4';
-        // Copilot + Effort: /v1/messages 엔드포인트는 Anthropic 형식이므로 anthropic-version 헤더 추가
-        if (config.effort && config.effort !== 'none') {
-            headers['anthropic-version'] = '2023-06-01';
-        }
-        // Copilot-Vision-Request header: detect vision content in messages
-        // OpenAI format uses 'image_url', Anthropic format uses 'image'
-        const hasVisionContent = body.messages && body.messages.some(m =>
-            Array.isArray(m?.content) && m.content.some(p => p.type === 'image_url' || p.type === 'image')
-        );
-        if (hasVisionContent) {
-            headers['Copilot-Vision-Request'] = 'true';
-        }
-    }
-
-    // --- Streaming support ---
-    // decoupled: per-model flag to force non-streaming
-    // cpm_streaming_enabled: global streaming toggle from user settings
-    // Only send stream:true to API when BOTH allow it
-    const streamingEnabled = await safeGetBoolArg('cpm_streaming_enabled', false);
-    const useStreaming = !config.decoupled && streamingEnabled;
-
-    // Capture API request info for API View feature
-    const _captureStartTime = Date.now();
-
-    if (useStreaming) {
-        // Build streaming request
-        const streamBody = { ...body };
-        let streamUrl = effectiveUrl;
-
-        if (format === 'anthropic') {
-            streamBody.stream = true;
-        } else if (format === 'google') {
-            // Switch endpoint to streamGenerateContent
-            streamUrl = effectiveUrl.replace(':generateContent', ':streamGenerateContent');
-            if (!streamUrl.includes('alt=')) streamUrl += (streamUrl.includes('?') ? '&' : '?') + 'alt=sse';
-        } else {
-            // OpenAI-compatible
-            streamBody.stream = true;
+        const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${_apiKey}` };
+        // Copilot auto-detection: if URL is githubcopilot.com, auto-fetch API token + attach Copilot headers
+        if (effectiveUrl && effectiveUrl.includes('githubcopilot.com')) {
+            // Auto-fetch Copilot API token (exchanges stored GitHub OAuth token for short-lived API token)
+            let copilotApiToken = config.copilotToken || '';
+            if (!copilotApiToken) {
+                copilotApiToken = await ensureCopilotApiToken();
+            }
+            if (copilotApiToken) {
+                headers['Authorization'] = `Bearer ${copilotApiToken}`;
+            } else {
+                console.warn('[Cupcake PM] Copilot: No API token available. Request may fail auth. Set token via Copilot Manager (🔑 탭).');
+            }
+            // Required Copilot headers (from cpm-copilot-manager & VS Code Copilot extension)
+            headers['Copilot-Integration-Id'] = 'vscode-chat';
+            headers['X-Request-Id'] = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString();
+            headers['Editor-Version'] = 'vscode/1.109.2';
+            headers['Editor-Plugin-Version'] = 'copilot-chat/0.37.4';
+            // Copilot + Effort: /v1/messages 엔드포인트는 Anthropic 형식이므로 anthropic-version 헤더 추가
+            if (config.effort && config.effort !== 'none') {
+                headers['anthropic-version'] = '2023-06-01';
+            }
+            // Copilot-Vision-Request header: detect vision content in messages
+            // OpenAI format uses 'image_url', Anthropic format uses 'image'
+            const hasVisionContent = body.messages && body.messages.some(m =>
+                Array.isArray(m?.content) && m.content.some(p => p.type === 'image_url' || p.type === 'image')
+            );
+            if (hasVisionContent) {
+                headers['Copilot-Vision-Request'] = 'true';
+            }
         }
 
-        // Use safeStringify → sanitizeBodyJSON for final safety
-        const finalBody = sanitizeBodyJSON(safeStringify(streamBody));
+        // --- Streaming support ---
+        // decoupled: per-model flag to force non-streaming
+        // cpm_streaming_enabled: global streaming toggle from user settings
+        // Only send stream:true to API when BOTH allow it
+        const streamingEnabled = await safeGetBoolArg('cpm_streaming_enabled', false);
+        const useStreaming = !config.decoupled && streamingEnabled;
+
+        // Capture API request info for API View feature
+        const _captureStartTime = Date.now();
+
+        if (useStreaming) {
+            // Build streaming request
+            const streamBody = { ...body };
+            let streamUrl = effectiveUrl;
+
+            if (format === 'anthropic') {
+                streamBody.stream = true;
+            } else if (format === 'google') {
+                // Switch endpoint to streamGenerateContent
+                streamUrl = effectiveUrl.replace(':generateContent', ':streamGenerateContent');
+                if (!streamUrl.includes('alt=')) streamUrl += (streamUrl.includes('?') ? '&' : '?') + 'alt=sse';
+            } else {
+                // OpenAI-compatible
+                streamBody.stream = true;
+            }
+
+            // Use safeStringify → sanitizeBodyJSON for final safety
+            const finalBody = sanitizeBodyJSON(safeStringify(streamBody));
+
+            // Capture last API request for API View
+            _lastCustomApiRequest = {
+                timestamp: new Date().toISOString(),
+                modelName: config.model || '(unknown)',
+                url: streamUrl,
+                method: 'POST',
+                headers: { ...headers, 'Authorization': headers['Authorization'] ? '***REDACTED***' : undefined },
+                body: (() => { try { return JSON.parse(finalBody); } catch { return finalBody; } })(),
+                response: null, status: null, duration: null
+            };
+
+            const res = await smartNativeFetch(streamUrl, {
+                method: 'POST',
+                headers,
+                body: finalBody
+                // NOTE: signal: abortSignal removed — AbortSignal can't cross V3 iframe bridge (postMessage structured clone)
+            });
+
+            _lastCustomApiRequest.duration = Date.now() - _captureStartTime;
+            _lastCustomApiRequest.status = res.status;
+
+            if (!res.ok) {
+                const errBody = await res.text();
+                _lastCustomApiRequest.response = errBody.substring(0, 2000);
+                console.error(`[Cupcake PM] Streaming request failed (${res.status}) for ${streamUrl.substring(0, 60)}:`, errBody.substring(0, 500));
+                return { success: false, content: `[Custom API Error ${res.status}] ${errBody}`, _status: res.status };
+            }
+
+            _lastCustomApiRequest.response = '(streaming — response body not captured)';
+
+            if (format === 'anthropic') {
+                const showThinking = await safeGetBoolArg('cpm_streaming_show_thinking', false);
+                return { success: true, content: createAnthropicSSEStream(res, abortSignal, { showThinking }) };
+            } else if (format === 'google') {
+                const _onComplete = config.useThoughtSignature ? () => saveThoughtSignatureFromStream(config) : undefined;
+                return { success: true, content: createSSEStream(res, (line) => parseGeminiSSELine(line, config), abortSignal, _onComplete) };
+            } else {
+                return { success: true, content: createSSEStream(res, parseOpenAISSELine, abortSignal) };
+            }
+        }
+
+        // --- Non-streaming (decoupled) fallback ---
+        const _nonStreamBody = sanitizeBodyJSON(safeStringify(body));
 
         // Capture last API request for API View
         _lastCustomApiRequest = {
             timestamp: new Date().toISOString(),
             modelName: config.model || '(unknown)',
-            url: streamUrl,
+            url: effectiveUrl,
             method: 'POST',
             headers: { ...headers, 'Authorization': headers['Authorization'] ? '***REDACTED***' : undefined },
-            body: (() => { try { return JSON.parse(finalBody); } catch { return finalBody; } })(),
+            body: (() => { try { return JSON.parse(_nonStreamBody); } catch { return _nonStreamBody; } })(),
             response: null, status: null, duration: null
         };
 
-        const res = await smartNativeFetch(streamUrl, {
+        const res = await smartNativeFetch(effectiveUrl, {
             method: 'POST',
             headers,
-            body: finalBody
+            body: _nonStreamBody
             // NOTE: signal: abortSignal removed — AbortSignal can't cross V3 iframe bridge (postMessage structured clone)
         });
 
@@ -2158,82 +2217,40 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
         if (!res.ok) {
             const errBody = await res.text();
             _lastCustomApiRequest.response = errBody.substring(0, 2000);
-            console.error(`[Cupcake PM] Streaming request failed (${res.status}) for ${streamUrl.substring(0, 60)}:`, errBody.substring(0, 500));
+            console.error(`[Cupcake PM] Non-streaming request failed (${res.status}) for ${effectiveUrl.substring(0, 60)}:`, errBody.substring(0, 500));
             return { success: false, content: `[Custom API Error ${res.status}] ${errBody}`, _status: res.status };
         }
 
         _lastCustomApiRequest.response = '(streaming — response body not captured)';
+        const data = await res.json();
+        _lastCustomApiRequest.response = data;
 
         if (format === 'anthropic') {
-            const showThinking = await safeGetBoolArg('cpm_streaming_show_thinking', false);
-            return { success: true, content: createAnthropicSSEStream(res, abortSignal, { showThinking }) };
+            let result = '';
+            if (Array.isArray(data.content)) {
+                for (const block of data.content) if (block.type === 'text') result += block.text;
+            }
+            return { success: true, content: result };
         } else if (format === 'google') {
-            const _onComplete = config.useThoughtSignature ? () => saveThoughtSignatureFromStream(config) : undefined;
-            return { success: true, content: createSSEStream(res, (line) => parseGeminiSSELine(line, config), abortSignal, _onComplete) };
-        } else {
-            return { success: true, content: createSSEStream(res, parseOpenAISSELine, abortSignal) };
-        }
-    }
-
-    // --- Non-streaming (decoupled) fallback ---
-    const _nonStreamBody = sanitizeBodyJSON(safeStringify(body));
-
-    // Capture last API request for API View
-    _lastCustomApiRequest = {
-        timestamp: new Date().toISOString(),
-        modelName: config.model || '(unknown)',
-        url: effectiveUrl,
-        method: 'POST',
-        headers: { ...headers, 'Authorization': headers['Authorization'] ? '***REDACTED***' : undefined },
-        body: (() => { try { return JSON.parse(_nonStreamBody); } catch { return _nonStreamBody; } })(),
-        response: null, status: null, duration: null
-    };
-
-    const res = await smartNativeFetch(effectiveUrl, {
-        method: 'POST',
-        headers,
-        body: _nonStreamBody
-        // NOTE: signal: abortSignal removed — AbortSignal can't cross V3 iframe bridge (postMessage structured clone)
-    });
-
-    _lastCustomApiRequest.duration = Date.now() - _captureStartTime;
-    _lastCustomApiRequest.status = res.status;
-
-    if (!res.ok) {
-        const errBody = await res.text();
-        _lastCustomApiRequest.response = errBody.substring(0, 2000);
-        console.error(`[Cupcake PM] Non-streaming request failed (${res.status}) for ${effectiveUrl.substring(0, 60)}:`, errBody.substring(0, 500));
-        return { success: false, content: `[Custom API Error ${res.status}] ${errBody}`, _status: res.status };
-    }
-    const data = await res.json();
-    _lastCustomApiRequest.response = data;
-
-    if (format === 'anthropic') {
-        let result = '';
-        if (Array.isArray(data.content)) {
-            for (const block of data.content) if (block.type === 'text') result += block.text;
-        }
-        return { success: true, content: result };
-    } else if (format === 'google') {
-        let result = '';
-        let extractedSignature = null;
-        if (data.candidates?.[0]?.content?.parts) {
-            for (const part of data.candidates[0].content.parts) {
-                if (part.text !== undefined && !part.thought) result += part.text;
-                // Extract thought signature from response parts (snake_case + camelCase)
-                if (config.useThoughtSignature && (part.thought_signature || part.thoughtSignature)) {
-                    extractedSignature = part.thought_signature || part.thoughtSignature;
+            let result = '';
+            let extractedSignature = null;
+            if (data.candidates?.[0]?.content?.parts) {
+                for (const part of data.candidates[0].content.parts) {
+                    if (part.text !== undefined && !part.thought) result += part.text;
+                    // Extract thought signature from response parts (snake_case + camelCase)
+                    if (config.useThoughtSignature && (part.thought_signature || part.thoughtSignature)) {
+                        extractedSignature = part.thought_signature || part.thoughtSignature;
+                    }
                 }
             }
+            // Save extracted signature to cache if present
+            if (extractedSignature && result) {
+                await ThoughtSignatureCache.save(result, extractedSignature);
+            }
+            return { success: true, content: result };
+        } else { // OpenAI compatible
+            return { success: true, content: data.choices?.[0]?.message?.content || '' };
         }
-        // Save extracted signature to cache if present
-        if (extractedSignature && result) {
-            await ThoughtSignatureCache.save(result, extractedSignature);
-        }
-        return { success: true, content: result };
-    } else { // OpenAI compatible
-        return { success: true, content: data.choices?.[0]?.message?.content || '' };
-    }
     }; // end _doCustomFetch
 
     // --- Key Rotation dispatch ---
@@ -2535,7 +2552,7 @@ async function handleRequest(args, activeModelDef, abortSignal) {
         // ── Silent Update Check (지연 자동 체크) ──
         // Fire-and-forget: 5초 후 경량 버전 체크, 실패해도 무시
         setTimeout(() => {
-            SubPluginManager.checkVersionsQuiet().catch(() => {});
+            SubPluginManager.checkVersionsQuiet().catch(() => { });
         }, 5000);
 
         // Setup the Native Sidebar UI settings
@@ -2562,7 +2579,7 @@ async function handleRequest(args, activeModelDef, abortSignal) {
             };
 
             // HTML-escape helper for attribute values
-            const escAttr = (s) => String(s ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+            const escAttr = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
             const renderInput = async (id, label, type = 'text', opts = []) => {
                 let html = `<div class="mb-4">`;
@@ -3512,7 +3529,8 @@ async function handleRequest(args, activeModelDef, abortSignal) {
                                     }
                                 }
                             }
-                            alert('설정을 성공적으로 불러왔습니다!');
+                            alert('설정을 성공적으로 불러왔습니다! UI를 갱신합니다.');
+                            openCpmSettings(); // 설정 패널 재렌더링
                         } catch (err) {
                             alert('설정 파일을 읽는 중 오류가 발생했습니다: ' + err.message);
                         }
