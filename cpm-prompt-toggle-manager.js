@@ -1,6 +1,6 @@
 // @name CPM Prompt Toggle Manager
 // @display-name ⚙️ PTM (프롬프트 토글 관리자) v3
-// @version 3.0.3
+// @version 3.0.4
 // @description CupcakePM 서브 플러그인 - 프롬프트 토글 설정을 프리셋으로 저장하고 관리합니다.
 // @icon ⚙️
 // @author Cupcake
