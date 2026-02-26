@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.10.9
+//@version 1.10.10
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.10.9';
+const CPM_VERSION = '1.10.10';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -1624,7 +1624,9 @@ async function fetchByProviderId(modelDef, args, abortSignal) {
     //   2. RisuAI separate parameters (db.seperateParameters[mode]) — applied by applyParameters() before plugin call
     //   3. RisuAI main parameters (db.temperature etc.) — applied by applyParameters() when separate params disabled
     //   4. CPM global fallback defaults (cpm_fallback_temp etc.) — user-configurable in CPM settings
-    //   5. Absolute hardcoded defaults (0.7 / 4096) — only when NOTHING else provides a value
+    //   5. Hardcoded default for temperature only (0.7) — max_tokens has NO hardcoded fallback
+    //      because RisuAI ALWAYS sends max_tokens from db.maxResponse (main model setting),
+    //      independent of parameter separation.
     const cpmFallbackTemp = await safeGetArg('cpm_fallback_temp');
     const cpmFallbackMaxTokens = await safeGetArg('cpm_fallback_max_tokens');
     const cpmFallbackTopP = await safeGetArg('cpm_fallback_top_p');
@@ -1632,7 +1634,10 @@ async function fetchByProviderId(modelDef, args, abortSignal) {
     const cpmFallbackPresPen = await safeGetArg('cpm_fallback_pres_pen');
 
     const temp = args.temperature ?? (cpmFallbackTemp !== '' ? parseFloat(cpmFallbackTemp) : 0.7);
-    const maxTokens = args.max_tokens ?? (cpmFallbackMaxTokens !== '' ? parseInt(cpmFallbackMaxTokens) : 4096);
+    // max_tokens: RisuAI always sends this from db.maxResponse (main model's setting),
+    // regardless of parameter separation. No hardcoded 4096 — main model value is used.
+    // CPM global fallback only applies as a safety net if somehow undefined.
+    const maxTokens = args.max_tokens ?? (cpmFallbackMaxTokens !== '' ? parseInt(cpmFallbackMaxTokens) : undefined);
 
     // Apply CPM global fallbacks for optional params (only when RisuAI didn't provide them)
     if (args.top_p === undefined && cpmFallbackTopP !== '') args.top_p = parseFloat(cpmFallbackTopP);
@@ -2090,7 +2095,7 @@ async function handleRequest(args, activeModelDef, abortSignal) {
                         </p>
                         <div class="space-y-2">
                             ${await renderInput('cpm_fallback_temp', 'Default Temperature (기본 온도, 비워두면 0.7)', 'number')}
-                            ${await renderInput('cpm_fallback_max_tokens', 'Default Max Output Tokens (기본 최대 응답, 비워두면 4096)', 'number')}
+                            ${await renderInput('cpm_fallback_max_tokens', 'Default Max Output Tokens (비워두면 메인모델 최대응답 설정 따름)', 'number')}
                             ${await renderInput('cpm_fallback_top_p', 'Default Top P (기본 Top P, 비워두면 API 기본값)', 'number')}
                             ${await renderInput('cpm_fallback_freq_pen', 'Default Frequency Penalty (기본 빈도 페널티, 비워두면 API 기본값)', 'number')}
                             ${await renderInput('cpm_fallback_pres_pen', 'Default Presence Penalty (기본 존재 페널티, 비워두면 API 기본값)', 'number')}
