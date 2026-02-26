@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.10.11
+//@version 1.10.12
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.10.11';
+const CPM_VERSION = '1.10.12';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -317,6 +317,20 @@ async function smartNativeFetch(url, options = {}) {
         }
     }
 
+    // ── POST-sanitization diagnostic ──
+    if (options.method === 'POST' && typeof options.body === 'string') {
+        try {
+            const _ps = JSON.parse(options.body);
+            if (Array.isArray(_ps.messages)) {
+                for (let _i = 0; _i < _ps.messages.length; _i++) {
+                    if (_ps.messages[_i] == null) {
+                        console.error(`[CupcakePM] 🚨 POST-SANITIZE NULL at messages[${_i}] in smartNativeFetch!`);
+                    }
+                }
+            }
+        } catch (_) {}
+    }
+
     // Strategy 1: Direct browser fetch from iframe (bypasses proxy if CSP allows)
     try {
         const res = await fetch(url, options);
@@ -326,47 +340,43 @@ async function smartNativeFetch(url, options = {}) {
         console.log(`[CupcakePM] Direct fetch failed for ${url.substring(0, 60)}...: ${e.message}`);
     }
 
-    // Strategy 2: Risuai.nativeFetch — proxy route with preserved body string
-    // This is preferred for POST requests because the body is passed as an EXACT string,
-    // avoiding the null-introduction bug from risuFetch's object→JSON.stringify round-trip.
-    // The proxy at sv.risuai.xyz/proxy2 supports streaming and handles most APIs well.
+    // Strategy 2: Risuai.nativeFetch with body as Uint8Array
+    // IMPORTANT: Encode body string to Uint8Array (binary) in the GUEST iframe BEFORE
+    // crossing the postMessage bridge. This avoids potential issues with long string
+    // serialization in postMessage structured clone. On the host side, fetchNative
+    // receives a Uint8Array and uses it directly (no re-encoding step).
+    // The Uint8Array's underlying ArrayBuffer is TRANSFERRED (zero-copy) across the bridge,
+    // which is both faster and avoids any string handling edge cases.
     try {
         console.log(`[CupcakePM] Using nativeFetch (proxy) for ${url.substring(0, 60)}...`);
-        const res = await Risuai.nativeFetch(url, options);
+        const nfOptions = { ...options };
+        if (typeof nfOptions.body === 'string') {
+            nfOptions.body = new TextEncoder().encode(nfOptions.body);
+        }
+        const res = await Risuai.nativeFetch(url, nfOptions);
 
         // Check for proxy-level failures that risuFetch (direct) could bypass:
-        // - 403 with region/country errors (Vertex AI, Google Cloud endpoints)
-        // - Proxy itself returning errors unrelated to the target API
         if (!res.ok && (res.status === 403 || res.status === 502 || res.status === 503)) {
             let errText = '';
-            try {
-                // Clone response to read error body without consuming it
-                errText = await res.clone().text();
-            } catch {}
+            try { errText = await res.clone().text(); } catch {}
             const isProxyRegionError = errText.includes('Country') || errText.includes('region') ||
                 errText.includes('territory') || errText.includes('not supported') ||
                 errText.includes('blocked') || errText.includes('proxy');
             if (isProxyRegionError) {
                 console.log(`[CupcakePM] nativeFetch proxy region/block error (${res.status}), trying risuFetch direct...`);
-                // Fall through to Strategy 3 (risuFetch direct)
+                // Fall through to Strategy 3
             } else {
-                // Real API error (not proxy issue) — return as-is
                 return res;
             }
         } else if (!res.ok && res.status === 400) {
             // ── Null-message corruption detection ──
-            // The proxy2 route (sv.risuai.xyz/proxy2) can corrupt the body in transit,
-            // causing null entries to appear in the messages array even though the body
-            // was verified clean before sending. Detect this specific error pattern
-            // and retry via Strategy 3 (direct fetch from HOST, bypassing proxy).
             let errText = '';
             try { errText = await res.clone().text(); } catch {}
             const isNullMessageError = errText.includes('got null instead') && errText.includes('messages');
             if (isNullMessageError) {
-                console.warn(`[CupcakePM] ⚠️ Null-message corruption detected via proxy route (400). Body was verified clean pre-send.`);
+                console.warn(`[CupcakePM] ⚠️ Null-message error from proxy route (400). Trying direct fetch...`);
                 console.warn(`[CupcakePM] ↳ Error: ${errText.substring(0, 300)}`);
-                console.warn(`[CupcakePM] ↳ Retrying via direct fetch (plainFetchForce) to bypass proxy...`);
-                // Fall through to Strategy 3 (risuFetch direct — bypasses proxy entirely)
+                // Fall through to Strategy 3
             } else {
                 return res;
             }
@@ -379,9 +389,13 @@ async function smartNativeFetch(url, options = {}) {
 
     // Strategy 3: risuFetch with plainFetchForce — direct fetch from HOST window
     // Bypasses both iframe CSP sandbox AND cloud proxy.
-    // Used when proxy fails (region-restricted APIs like Vertex AI, Google Cloud).
-    // IMPORTANT: body object crosses postMessage bridge → host re-stringifies via JSON.stringify.
-    // We must deep-sanitize the parsed body to prevent null entries from surviving the round-trip.
+    // CRITICAL FIX: The host's fetchWithPlainFetch does `JSON.stringify(arg.body)`.
+    // If we pass the body as a parsed object, the host re-stringifies it with standard
+    // JSON.stringify (without our safe replacer), which can re-introduce nulls.
+    // SOLUTION: Instead, we pass a special wrapper that preserves the exact body string.
+    // Since fetchWithPlainFetch always does JSON.stringify(arg.body), if arg.body is already
+    // a string, it would double-stringify. So we must pass as object.
+    // But we deep-clone and filter exhaustively before crossing the bridge.
     if (typeof Risuai.risuFetch === 'function') {
         try {
             let bodyObj = undefined;
@@ -392,22 +406,44 @@ async function smartNativeFetch(url, options = {}) {
             }
 
             // ── Deep-sanitize body object before it crosses the postMessage bridge ──
-            // The V3 bridge uses structured clone + JSON.stringify on the host side.
             // Deep plain clone via JSON round-trip strips hidden toJSON, getters, prototype chains.
-            // Then filter null/invalid entries from messages/contents arrays.
+            // Reconstruct every message as a minimal plain object (only known safe keys).
             if (bodyObj && typeof bodyObj === 'object') {
                 if (Array.isArray(bodyObj.messages)) {
-                    try { bodyObj.messages = JSON.parse(JSON.stringify(bodyObj.messages)); } catch (_) {}
-                    bodyObj.messages = bodyObj.messages.filter(m => {
-                        if (m == null || typeof m !== 'object') return false;
-                        if (m.content === null || m.content === undefined) return false;
-                        if (typeof m.role !== 'string' || !m.role) return false;
-                        return true;
-                    });
+                    // Nuclear deep-clone: serialize → parse → manually reconstruct each message
+                    try {
+                        const rawMsgs = JSON.parse(JSON.stringify(bodyObj.messages));
+                        bodyObj.messages = [];
+                        for (let _ri = 0; _ri < rawMsgs.length; _ri++) {
+                            const _rm = rawMsgs[_ri];
+                            if (_rm == null || typeof _rm !== 'object') continue;
+                            if (typeof _rm.role !== 'string' || !_rm.role) continue;
+                            if (_rm.content === null || _rm.content === undefined) continue;
+                            // Reconstruct with ONLY safe keys — no hidden properties can survive
+                            const safeMsg = { role: _rm.role, content: _rm.content };
+                            if (_rm.name && typeof _rm.name === 'string') safeMsg.name = _rm.name;
+                            bodyObj.messages.push(safeMsg);
+                        }
+                    } catch (_e) {
+                        console.error('[CupcakePM] Deep reconstruct of messages failed:', _e.message);
+                        // Fallback: simple filter
+                        bodyObj.messages = bodyObj.messages.filter(m => m != null && typeof m === 'object');
+                    }
                 }
                 if (Array.isArray(bodyObj.contents)) {
                     try { bodyObj.contents = JSON.parse(JSON.stringify(bodyObj.contents)); } catch (_) {}
                     bodyObj.contents = bodyObj.contents.filter(m => m != null && typeof m === 'object');
+                }
+            }
+
+            // Diagnostic: verify body object before risuFetch
+            if (bodyObj && Array.isArray(bodyObj.messages)) {
+                console.log(`[CupcakePM] Strategy 3: ${bodyObj.messages.length} messages before risuFetch`);
+                for (let _rfi = 0; _rfi < bodyObj.messages.length; _rfi++) {
+                    const _rfm = bodyObj.messages[_rfi];
+                    if (_rfm == null) {
+                        console.error(`[CupcakePM] 🚨 Strategy 3: messages[${_rfi}] is NULL before risuFetch!`);
+                    }
                 }
             }
 
@@ -1585,7 +1621,7 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
         // Use safeStringify (nuclear replacer) → sanitizeBodyJSON (parse+filter+verify)
         const finalBody = sanitizeBodyJSON(safeStringify(streamBody));
 
-        // ── Diagnostic: verify final body before fetch ──
+        // ── Comprehensive diagnostic: verify final body before fetch ──
         try {
             const _diag = JSON.parse(finalBody);
             if (Array.isArray(_diag.messages)) {
@@ -1598,6 +1634,18 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
                 } else {
                     console.log(`[Cupcake PM] ✓ Pre-fetch body OK: ${_diag.messages.length} messages, model=${_diag.model}`);
                 }
+                // Detailed per-message dump for null-message debugging
+                for (let _d = 0; _d < _diag.messages.length; _d++) {
+                    const _m = _diag.messages[_d];
+                    if (_m == null) {
+                        console.error(`[Cupcake PM] 📋 messages[${_d}]: *** NULL ***`);
+                    } else {
+                        const _ct = typeof _m.content;
+                        const _cv = _ct === 'string' ? _m.content.substring(0, 60) : (Array.isArray(_m.content) ? `Array(${_m.content.length})` : JSON.stringify(_m.content).substring(0, 60));
+                        console.log(`[Cupcake PM] 📋 messages[${_d}]: role=${_m.role}, content_type=${_ct}, keys=[${Object.keys(_m).join(',')}], preview="${_cv}"`);
+                    }
+                }
+                console.log(`[Cupcake PM] 📋 Body length: ${finalBody.length} chars`);
             }
         } catch (_) {}
 
