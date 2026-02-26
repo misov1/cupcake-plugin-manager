@@ -1,7 +1,7 @@
 //@name CPM Component - Chat Input Resizer
 //@display-name Cupcake UI Resizer
 //@api 3.0
-//@version 0.1.5
+//@version 0.1.6
 //@author Cupcake
 //@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-chat-resizer.js
 
@@ -170,38 +170,58 @@
         // ==========================================
         let isResizerEnabled = null;
 
-        // Attach ↕️ button to a single SafeElement textarea
+        // Selectors for textareas that should NOT get a resize button
+        // (same exclusion list as RisuTextAreaExpander)
+        const EXCLUDE_SELECTORS = [
+            '.text-input-area',
+            '#messageInputTranslate',
+            '.partial-edit-textarea',
+        ];
+
+        // Attach 🧁 button to a single SafeElement textarea
         const attachButtonToTextarea = async (ta) => {
             try {
                 // Already processed — skip
                 const marker = await ta.getAttribute('x-cpm-resizer');
                 if (marker) return;
 
+                // Check if this textarea should be excluded (chat input area, etc.)
+                let isExcluded = false;
+                for (const sel of EXCLUDE_SELECTORS) {
+                    try {
+                        if (await ta.matches(sel)) { isExcluded = true; break; }
+                    } catch (_) {}
+                }
+                if (isExcluded) {
+                    await ta.setAttribute('x-cpm-resizer', 'skip');
+                    return;
+                }
+
                 await ta.setAttribute('x-cpm-resizer', '1');
 
                 const parent = await ta.getParent();
                 if (parent && !(await parent.querySelector('.cpm-resize-btn'))) {
 
-                    // Skip textareas in the chat input bar (near send/menu SVG-icon buttons)
-                    let isChatInput = false;
-                    try {
-                        const svgBtn = await parent.querySelector('button:not(.cpm-resize-btn) svg');
-                        if (svgBtn) isChatInput = true;
-                        if (!isChatInput) {
-                            const gp = await parent.getParent();
-                            if (gp) {
-                                const svgBtn2 = await gp.querySelector('button:not(.cpm-resize-btn) svg');
-                                if (svgBtn2) isChatInput = true;
-                            }
-                        }
-                    } catch (_) {}
-                    if (isChatInput) return;
+                    // Ensure parent has relative positioning for absolute button
+                    const pos = await parent.getStyle('position');
+                    if (!pos || pos === 'static' || pos === '') {
+                        await parent.setStyle('position', 'relative');
+                    }
 
                     const btn = await rootDoc.createElement('button');
                     const btnId = 'cpm-btn-' + Math.random().toString(36).substring(2, 9);
                     await btn.setAttribute('x-id', btnId);
 
-                    await btn.setClassName('cpm-resize-btn absolute bottom-2 right-4 text-gray-400 hover:text-white z-[100] p-1 bg-gray-800 rounded opacity-40 hover:opacity-100 transition-opacity text-xs');
+                    await btn.setClassName('cpm-resize-btn');
+                    await btn.setStyleAttribute(
+                        'position:absolute; bottom:4px; right:4px; z-index:50; ' +
+                        'width:24px; height:24px; padding:0; margin:0; ' +
+                        'display:flex; align-items:center; justify-content:center; ' +
+                        'background:rgba(39,39,42,0.8); color:#a1a1aa; ' +
+                        'border:1px solid rgba(63,63,70,0.5); border-radius:4px; ' +
+                        'cursor:pointer; font-size:13px; line-height:1; ' +
+                        'opacity:0.4;'
+                    );
                     await btn.setInnerHTML('🧁');
                     await btn.setAttribute('x-title', '창 최대화 / 크기 조절');
 
