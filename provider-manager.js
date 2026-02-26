@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.14.4
+//@version 1.14.5
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.14.4';
+const CPM_VERSION = '1.14.5';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -646,7 +646,7 @@ const SubPluginManager = {
             if (updatesAvailable.length > 0) {
                 this._pendingUpdateNames = updatesAvailable.map(u => u.name);
                 console.log(`[CPM AutoCheck] ${updatesAvailable.length} update(s) available:`, updatesAvailable.map(u => `${u.name} ${u.localVersion}→${u.remoteVersion}`).join(', '));
-                this.showUpdateToast(updatesAvailable);
+                await this.showUpdateToast(updatesAvailable);
             } else {
                 console.log(`[CPM AutoCheck] All sub-plugins up to date.`);
             }
@@ -660,10 +660,14 @@ const SubPluginManager = {
      * Show a lightweight, non-intrusive toast notification about available updates.
      * Auto-dismisses after 8 seconds. Minimal DOM footprint.
      */
-    showUpdateToast(updates) {
+    async showUpdateToast(updates) {
         try {
-            // Determine target document: prefer RisuAI root document, fallback to current document
-            const doc = document;
+            // Must use getRootDocument to escape the sandboxed iframe
+            let doc;
+            try {
+                doc = await risuai.getRootDocument();
+            } catch (_) {}
+            if (!doc) doc = document;
 
             // Remove previous toast if exists
             const existing = doc.getElementById('cpm-update-toast');
@@ -716,11 +720,11 @@ const SubPluginManager = {
             `;
             doc.body.appendChild(toast);
 
-            // Animate in
-            requestAnimationFrame(() => {
+            // Animate in (use setTimeout for cross-document safety)
+            setTimeout(() => {
                 toast.style.opacity = '1';
                 toast.style.transform = 'translateY(0)';
-            });
+            }, 30);
 
             // Close button
             const closeBtn = doc.getElementById('cpm-update-toast-close');
