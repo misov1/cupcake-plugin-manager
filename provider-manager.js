@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.10.7
+//@version 1.10.8
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.10.7';
+const CPM_VERSION = '1.10.8';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -1615,8 +1615,21 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
 // ==========================================
 
 async function fetchByProviderId(modelDef, args, abortSignal) {
-    const temp = args.temperature || 0.7;
-    const maxTokens = args.max_tokens || 4096;
+    // CRITICAL: Use ?? (nullish coalescing) not || (logical OR) for numeric fallbacks.
+    // || treats 0 as falsy → temperature=0 would become 0.7, which is wrong.
+    // ?? only falls back for null/undefined, preserving valid 0 values.
+    //
+    // Parameter source chain (highest priority first):
+    //   1. CPM slot overrides (cpm_slot_<slot>_temp etc.) — applied in handleRequest()
+    //   2. RisuAI separate parameters (db.seperateParameters[mode]) — applied by applyParameters() before plugin call
+    //   3. RisuAI main parameters (db.temperature etc.) — applied by applyParameters() when separate params disabled
+    //   4. Fallback defaults (0.7 / 4096) — only when none of the above provide a value
+    const temp = args.temperature ?? 0.7;
+    const maxTokens = args.max_tokens ?? 4096;
+
+    // Diagnostic: log parameter values received from RisuAI (helps debug separate params issues)
+    console.log(`[Cupcake PM] 📊 Parameters for ${modelDef.name}: temp=${args.temperature}→${temp}, max_tokens=${args.max_tokens}→${maxTokens}, top_p=${args.top_p}, freq_pen=${args.frequency_penalty}, pres_pen=${args.presence_penalty}, top_k=${args.top_k}, rep_pen=${args.repetition_penalty}, min_p=${args.min_p}`);
+
     // Deep-sanitize messages — RisuAI's runTrigger (JSON round-trip), V3 iframe
     // postMessage bridge, and replacerbeforeRequest hooks can introduce null entries
     // or leave internal tags ({{inlay::...}}, <qak>) in prompt_chat.
@@ -1661,8 +1674,32 @@ async function fetchByProviderId(modelDef, args, abortSignal) {
 }
 
 async function handleRequest(args, activeModelDef, abortSignal) {
+    // ── Parameter Flow Documentation ──
+    // RisuAI V3 forces args.mode='v3' for security, so we cannot know the original
+    // request mode (translate/memory/emotion/submodel). However, the PARAMETERS
+    // (temperature, top_p, etc.) are already correctly applied by RisuAI's
+    // applyParameters() BEFORE they reach this plugin:
+    //
+    //   - If db.seperateParametersEnabled=true in RisuAI:
+    //     → args.temperature etc. come from db.seperateParameters[originalMode]
+    //     → These are the mode-specific separate parameter values the user configured
+    //   - If db.seperateParametersEnabled=false (default):
+    //     → args.temperature etc. come from db.temperature/100, db.top_p, etc.
+    //     → These are the main model's parameter values
+    //   - If separate params enabled but not configured for a mode:
+    //     → args.temperature etc. are UNDEFINED (RisuAI skips NaN values)
+    //     → Cupcake falls back to defaults (0.7 temp) or CPM slot overrides
+    //
+    // CPM's own slot parameter system provides an ADDITIONAL override layer on top
+    // of whatever RisuAI sends. CPM slot params only apply when:
+    //   1. The model is explicitly assigned to a CPM slot (translation/emotion/memory/other)
+    //   2. The slot param field is non-empty in CPM settings
+
     // V3 forces args.mode='v3', so we infer the slot from CPM's own slot config.
     const slot = await inferSlot(activeModelDef);
+
+    // Diagnostic: log what RisuAI passed us BEFORE any CPM overrides
+    console.log(`[Cupcake PM] 📥 Received from RisuAI — mode=${args.mode}, temp=${args.temperature}, top_p=${args.top_p}, freq_pen=${args.frequency_penalty}, pres_pen=${args.presence_penalty}, max_tokens=${args.max_tokens}, slot=${slot}, model=${activeModelDef.name}`);
 
     // Route to the provider that the UI / RisuAI selected
     let targetDef = activeModelDef;
@@ -1671,7 +1708,9 @@ async function handleRequest(args, activeModelDef, abortSignal) {
     if (slot !== 'chat') {
         console.log(`[Cupcake PM] Aux slot detected: '${slot}' for model '${activeModelDef.name}'`);
 
-        // Override generation params if provided for this slot
+        // Override generation params if provided for this slot.
+        // Empty string = don't override (keep RisuAI's value).
+        // '0' (string) is truthy, so explicit 0 values ARE applied.
         const maxOut = await safeGetArg(`cpm_slot_${slot}_max_out`);
         const maxCtx = await safeGetArg(`cpm_slot_${slot}_max_context`);
         const temp = await safeGetArg(`cpm_slot_${slot}_temp`);
@@ -1689,6 +1728,8 @@ async function handleRequest(args, activeModelDef, abortSignal) {
         if (repPen) args.repetition_penalty = parseFloat(repPen);
         if (freqPen) args.frequency_penalty = parseFloat(freqPen);
         if (presPen) args.presence_penalty = parseFloat(presPen);
+
+        console.log(`[Cupcake PM] 📝 After CPM slot overrides — temp=${args.temperature}, top_p=${args.top_p}, freq_pen=${args.frequency_penalty}, pres_pen=${args.presence_penalty}, max_tokens=${args.max_tokens}`);
     }
 
     const result = await fetchByProviderId(targetDef, args, abortSignal);
@@ -1972,7 +2013,9 @@ async function handleRequest(args, activeModelDef, abortSignal) {
                     <div class="mt-8 pt-6 border-t border-gray-800 space-y-2">
                         <h4 class="text-xl font-bold text-gray-300 mb-2">Generation Parameters (생성 설정)</h4>
                         <p class="text-xs text-blue-400 font-semibold mb-4 border-l-2 border-blue-500 pl-2">
-                            값을 입력하면 기본 설정 대신 우선 적용됩니다. (비워두면 메인 챗 설정 따름)
+                            여기 값을 입력하면 리스AI 설정(파라미터 분리 포함) 대신 이 값이 우선 적용됩니다.<br/>
+                            비워두면 리스AI의 '파라미터 분리' 설정값이 사용되고, 파라미터 분리도 미설정이면 메인 모델 설정값이 사용됩니다.<br/>
+                            <span class="text-gray-500">(CPM slot override &gt; RisuAI separate params &gt; RisuAI main params &gt; default 0.7)</span>
                         </p>
                         ${await renderInput(`cpm_slot_${slot}_max_context`, 'Max Context Tokens (최대 컨텍스트)', 'number')}
                         ${await renderInput(`cpm_slot_${slot}_max_out`, 'Max Output Tokens (최대 응답 크기)', 'number')}
