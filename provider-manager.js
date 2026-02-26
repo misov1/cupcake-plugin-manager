@@ -1,7 +1,7 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.11.0
+//@version 1.11.1
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
 const CPM_VERSION = '1.11.1';
