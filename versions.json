@@ -1,8 +1,8 @@
 {
     "CPM Provider - Vertex AI": {
-        "version": "1.5.7",
+        "version": "1.5.8",
         "file": "cpm-provider-vertex.js",
-        "changes": "토큰 발급 시 smartNativeFetch 사용 (V3 iframe structured clone 오류 수정)"
+        "changes": "기본 리전 us-central1 → global 변경"
     },
     "CPM Provider - Gemini Studio": {
         "version": "1.5.5",
