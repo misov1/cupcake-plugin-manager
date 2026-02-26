@@ -1,7 +1,7 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.10.17
+//@version 1.10.18
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
 const CPM_VERSION = '1.10.17';
@@ -508,15 +508,17 @@ const SettingsBackup = {
             ...auxKeys,
             'cpm_enable_chat_resizer',
             'cpm_custom_models',
+            // Global Fallback Parameters
+            'cpm_fallback_temp', 'cpm_fallback_max_tokens', 'cpm_fallback_top_p', 'cpm_fallback_freq_pen', 'cpm_fallback_pres_pen',
             // OpenAI
             'cpm_openai_key', 'cpm_openai_url', 'cpm_openai_model', 'cpm_openai_reasoning', 'cpm_openai_verbosity', 'common_openai_servicetier',
             // Anthropic
             'cpm_anthropic_key', 'cpm_anthropic_url', 'cpm_anthropic_model', 'cpm_anthropic_thinking_budget', 'cpm_anthropic_thinking_effort', 'chat_claude_caching',
             // Gemini
-            'cpm_gemini_key', 'cpm_gemini_model', 'cpm_gemini_thinking_level',
+            'cpm_gemini_key', 'cpm_gemini_model', 'cpm_gemini_thinking_level', 'cpm_gemini_thinking_budget',
             'chat_gemini_preserveSystem', 'chat_gemini_showThoughtsToken', 'chat_gemini_useThoughtSignature', 'chat_gemini_usePlainFetch',
             // Vertex
-            'cpm_vertex_key_json', 'cpm_vertex_location', 'cpm_vertex_model', 'cpm_vertex_thinking_level',
+            'cpm_vertex_key_json', 'cpm_vertex_location', 'cpm_vertex_model', 'cpm_vertex_thinking_level', 'cpm_vertex_thinking_budget', 'cpm_vertex_claude_thinking_budget',
             'chat_vertex_preserveSystem', 'chat_vertex_showThoughtsToken', 'chat_vertex_useThoughtSignature',
             // AWS
             'cpm_aws_key', 'cpm_aws_secret', 'cpm_aws_region', 'cpm_aws_thinking_budget', 'cpm_aws_thinking_effort',
@@ -941,6 +943,7 @@ window.CupcakePM = {
     createAnthropicSSEStream,
     parseGeminiSSELine,
     collectStream,
+    buildGeminiThinkingConfig,
     safeGetArg,
     safeGetBoolArg,
     setArg: (k, v) => risuai.setArgument(k, String(v)),
@@ -1016,6 +1019,41 @@ async function inferSlot(activeModelDef) {
         }
     }
     return 'chat';
+}
+
+/**
+ * Build Gemini thinkingConfig based on model version.
+ * - Gemini 3+: uses thinkMode (level string: MINIMAL/LOW/MEDIUM/HIGH)
+ * - Gemini 2.5: uses thinkingBudget (numeric token count)
+ *
+ * @param {string} model - Model ID (e.g. 'gemini-3-pro-preview', 'gemini-2.5-flash')
+ * @param {string} level - Thinking level from dropdown (off/none/MINIMAL/LOW/MEDIUM/HIGH)
+ * @param {number|string} [budget] - Explicit token budget (for 2.5 models)
+ * @returns {object|null} thinkingConfig object or null if disabled
+ */
+function buildGeminiThinkingConfig(model, level, budget) {
+    const isGemini3 = /gemini-3/i.test(model || '');
+    const budgetNum = parseInt(budget) || 0;
+
+    if (isGemini3) {
+        // Gemini 3+: thinking mode/level (thinkMode)
+        if (level && level !== 'off' && level !== 'none') {
+            return { thinkMode: level };
+        }
+        return null;
+    }
+
+    // Gemini 2.5 and others: thinking budget (thinkingBudget)
+    if (budgetNum > 0) {
+        return { thinkingBudget: budgetNum };
+    }
+    // Fallback: if level is set but no explicit budget, map level to budget
+    if (level && level !== 'off' && level !== 'none') {
+        const budgets = { 'MINIMAL': 1024, 'LOW': 4096, 'MEDIUM': 10240, 'HIGH': 24576 };
+        const mapped = budgets[level] || parseInt(level) || 10240;
+        return { thinkingBudget: mapped };
+    }
+    return null;
 }
 
 function formatToOpenAI(messages, config = {}) {
@@ -1406,9 +1444,9 @@ async function ensureCopilotApiToken() {
             headers: {
                 'Accept': 'application/json',
                 'Authorization': `Bearer ${cleanToken}`,
-                'User-Agent': 'GitHubCopilotChat/0.24.1',
-                'Editor-Version': 'vscode/1.96.4',
-                'Editor-Plugin-Version': 'copilot-chat/0.24.1',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Code/1.109.2 Chrome/142.0.7444.265 Electron/39.3.0 Safari/537.36',
+                'Editor-Version': 'vscode/1.109.2',
+                'Editor-Plugin-Version': 'copilot-chat/0.37.4',
                 'X-GitHub-Api-Version': '2024-12-15',
             }
         });
@@ -1523,9 +1561,8 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
         body.contents = formattedMessages;
         if (systemPrompt) body.systemInstruction = { parts: [{ text: systemPrompt }] };
         body.generationConfig = { temperature: temp, maxOutputTokens: maxTokens };
-        if (config.thinking_level && config.thinking_level !== 'none' && config.thinking_level !== 'off') {
-            body.generationConfig.thinkingConfig = { thinkingBudget: 8192 };
-        }
+        const _thinkCfg = buildGeminiThinkingConfig(config.model, config.thinking_level);
+        if (_thinkCfg) body.generationConfig.thinkingConfig = _thinkCfg;
         delete body.temperature;
         delete body.max_tokens;
     } else { // OpenAI compatible
@@ -1610,8 +1647,12 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
     // Copilot + Effort auto-URL: effort 활성화 시 /v1/messages 엔드포인트로 자동 전환
     let effectiveUrl = config.url;
     if (config.url && config.url.includes('githubcopilot.com') && config.effort && config.effort !== 'none') {
-        effectiveUrl = 'https://api.githubcopilot.com/v1/messages';
-        console.log('[Cupcake PM] Copilot + Effort detected → URL auto-switched to /v1/messages');
+        if (format === 'anthropic') {
+            effectiveUrl = 'https://api.githubcopilot.com/v1/messages';
+            console.log('[Cupcake PM] Copilot + Effort detected → URL auto-switched to /v1/messages');
+        } else {
+            console.warn('[Cupcake PM] Copilot + Effort: effort는 Anthropic 포맷에서만 지원됩니다. format을 "anthropic"으로 변경하세요.');
+        }
     }
 
     const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.key}` };
@@ -1637,7 +1678,11 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
             headers['anthropic-version'] = '2023-06-01';
         }
         // Copilot-Vision-Request header: detect vision content in messages
-        if (body.messages && body.messages.some(m => Array.isArray(m?.content) && m.content.some(p => p.type === 'image_url'))) {
+        // OpenAI format uses 'image_url', Anthropic format uses 'image'
+        const hasVisionContent = body.messages && body.messages.some(m =>
+            Array.isArray(m?.content) && m.content.some(p => p.type === 'image_url' || p.type === 'image')
+        );
+        if (hasVisionContent) {
             headers['Copilot-Vision-Request'] = 'true';
         }
     }
@@ -1740,7 +1785,7 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
 
     if (!res.ok) {
         const errBody = await res.text();
-        console.error(`[Cupcake PM] Non-streaming request failed (${res.status}) for ${config.url.substring(0, 60)}:`, errBody.substring(0, 500));
+        console.error(`[Cupcake PM] Non-streaming request failed (${res.status}) for ${effectiveUrl.substring(0, 60)}:`, errBody.substring(0, 500));
         return { success: false, content: `[Custom API Error ${res.status}] ${errBody}` };
     }
     const data = await res.json();
@@ -2864,6 +2909,8 @@ async function handleRequest(args, activeModelDef, abortSignal) {
                     ...auxKeys,
                     'cpm_enable_chat_resizer',
                     'cpm_custom_models',
+                    // Global Fallback Parameters
+                    'cpm_fallback_temp', 'cpm_fallback_max_tokens', 'cpm_fallback_top_p', 'cpm_fallback_freq_pen', 'cpm_fallback_pres_pen',
                     // Dynamically include provider export keys from registered tabs
                     ...registeredProviderTabs.flatMap(tab => tab.exportKeys || [])
                 ];

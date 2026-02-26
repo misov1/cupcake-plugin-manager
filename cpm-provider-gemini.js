@@ -1,5 +1,5 @@
 // @name CPM Provider - Gemini Studio
-// @version 1.4.1
+// @version 1.4.2
 // @description Google Gemini Studio (API Key) provider for Cupcake PM (Streaming)
 // @icon 🔵
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-gemini.js
@@ -67,6 +67,7 @@
                 key: await CPM.safeGetArg('cpm_gemini_key'),
                 model: modelDef.id,
                 thinking: await CPM.safeGetArg('cpm_gemini_thinking_level'),
+                thinkingBudget: await CPM.safeGetArg('cpm_gemini_thinking_budget'),
                 preserveSystem: await CPM.safeGetBoolArg('chat_gemini_preserveSystem'),
                 showThoughtsToken: await CPM.safeGetBoolArg('chat_gemini_showThoughtsToken'),
                 useThoughtSignature: await CPM.safeGetBoolArg('chat_gemini_useThoughtSignature'),
@@ -82,7 +83,13 @@
             if (args.frequency_penalty !== undefined && args.frequency_penalty !== null) body.generationConfig.frequencyPenalty = args.frequency_penalty;
             if (args.presence_penalty !== undefined && args.presence_penalty !== null) body.generationConfig.presencePenalty = args.presence_penalty;
             if (systemInstruction.length > 0) body.systemInstruction = { parts: systemInstruction.map(text => ({ text })) };
-            if (config.thinking && config.thinking !== 'off') body.generationConfig.thinkingConfig = { thinkingBudget: 8192 };
+            // Gemini 3: thinkMode (level string), Gemini 2.5: thinkingBudget (number)
+            if (typeof CPM.buildGeminiThinkingConfig === 'function') {
+                const _tc = CPM.buildGeminiThinkingConfig(model, config.thinking, config.thinkingBudget);
+                if (_tc) body.generationConfig.thinkingConfig = _tc;
+            } else if (config.thinking && config.thinking !== 'off' && config.thinking !== 'none') {
+                body.generationConfig.thinkingConfig = { thinkMode: config.thinking };
+            }
 
             const fetchFn = typeof CPM.smartNativeFetch === 'function' ? CPM.smartNativeFetch : Risuai.nativeFetch;
             const res = await fetchFn(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -93,13 +100,14 @@
             id: 'tab-gemini',
             icon: '🔵',
             label: 'Gemini Studio',
-            exportKeys: ['cpm_gemini_key', 'cpm_gemini_thinking_level', 'chat_gemini_preserveSystem', 'chat_gemini_showThoughtsToken', 'chat_gemini_useThoughtSignature', 'chat_gemini_usePlainFetch', 'cpm_dynamic_googleai'],
+            exportKeys: ['cpm_gemini_key', 'cpm_gemini_thinking_level', 'cpm_gemini_thinking_budget', 'chat_gemini_preserveSystem', 'chat_gemini_showThoughtsToken', 'chat_gemini_useThoughtSignature', 'chat_gemini_usePlainFetch', 'cpm_dynamic_googleai'],
             renderContent: async (renderInput, lists) => {
                 return `
                     <h3 class="text-3xl font-bold text-indigo-400 mb-6 pb-3 border-b border-gray-700">Gemini Studio Configuration (설정)</h3>
                     ${await renderInput('cpm_gemini_key', 'API Key (API 키)', 'password')}
                     ${await renderInput('cpm_dynamic_googleai', '📡 서버에서 모델 목록 불러오기 (Fetch models from API)', 'checkbox')}
-                    ${await renderInput('cpm_gemini_thinking_level', 'Thinking Level (생각 수준)', 'select', lists.thinkingList)}
+                    ${await renderInput('cpm_gemini_thinking_level', 'Thinking Level (생각 수준 - Gemini 3용)', 'select', lists.thinkingList)}
+                    ${await renderInput('cpm_gemini_thinking_budget', 'Thinking Budget Tokens (생각 토큰 예산 - Gemini 2.5용, 0은 끄기)', 'number')}
                     ${await renderInput('chat_gemini_preserveSystem', 'Preserve System (시스템 프롬프트 보존)', 'checkbox')}
                     ${await renderInput('chat_gemini_showThoughtsToken', 'Show Thoughts Token Info (생각 토큰 알림 표시)', 'checkbox')}
                     ${await renderInput('chat_gemini_useThoughtSignature', 'Use Thought Signature (생각 서명 추출 사용)', 'checkbox')}
