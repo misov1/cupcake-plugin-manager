@@ -2365,6 +2365,13 @@ async function handleRequest(args, activeModelDef, abortSignal) {
                     const val = await getVal(id);
                     html += `<label class="block text-sm font-medium text-gray-400 mb-1">${label}</label>`;
                     html += `<textarea id="${id}" class="w-full bg-gray-800 border border-gray-600 rounded px-3 py-2 text-white focus:outline-none focus:border-blue-500 h-24" spellcheck="false">${escAttr(val)}</textarea></div>`;
+                } else if (type === 'password') {
+                    const val = await getVal(id);
+                    html += `<label class="block text-sm font-medium text-gray-400 mb-1">${label}</label>`;
+                    html += `<div class="relative">`;
+                    html += `<input id="${id}" type="password" value="${escAttr(val)}" class="w-full bg-gray-800 border border-gray-600 rounded px-3 py-2 pr-10 text-white focus:outline-none focus:border-blue-500">`;
+                    html += `<button type="button" class="cpm-pw-toggle absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-white focus:outline-none text-lg px-1" data-target-id="${id}" title="비밀번호 보기/숨기기">👁️</button>`;
+                    html += `</div></div>`;
                 } else {
                     const val = await getVal(id);
                     html += `<label class="block text-sm font-medium text-gray-400 mb-1">${label}</label>`;
@@ -2868,6 +2875,23 @@ async function handleRequest(args, activeModelDef, abortSignal) {
 
             content.querySelectorAll('input[type="checkbox"]').forEach(el => {
                 el.addEventListener('change', (e) => setVal(getActualId(e), e.target.checked));
+            });
+
+            // Password visibility toggle (👁️ buttons)
+            content.querySelectorAll('.cpm-pw-toggle').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const input = document.getElementById(btn.dataset.targetId);
+                    if (!input) return;
+                    if (input.type === 'password') {
+                        input.type = 'text';
+                        btn.textContent = '🔒';
+                        btn.title = '비밀번호 숨기기';
+                    } else {
+                        input.type = 'password';
+                        btn.textContent = '👁️';
+                        btn.title = '비밀번호 보기';
+                    }
+                });
             });
 
             const tabs = sidebar.querySelectorAll('.tab-btn');
