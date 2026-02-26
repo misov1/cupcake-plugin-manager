@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.10.16
+//@version 1.10.17
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.10.15';
+const CPM_VERSION = '1.10.17';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -1498,7 +1498,20 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
     if (format === 'anthropic') {
         body.messages = formattedMessages;
         if (systemPrompt) body.system = systemPrompt;
-        if (config.thinking_level && config.thinking_level !== 'none' && config.thinking_level !== 'off') {
+
+        // Anthropic Adaptive Thinking Effort (effort 드롭다운)
+        const effortVal = config.effort && config.effort !== 'none' ? config.effort : null;
+        if (effortVal) {
+            if (effortVal === 'unspecified') {
+                // 미지정: adaptive thinking 활성화, effort 지정 안함
+                body.thinking = { type: 'adaptive' };
+            } else {
+                // low / medium / high / max
+                body.thinking = { type: 'adaptive' };
+                body.output_config = { effort: effortVal };
+            }
+            delete body.temperature;
+        } else if (config.thinking_level && config.thinking_level !== 'none' && config.thinking_level !== 'off') {
             const budget = parseInt(config.thinking_level) || 0;
             if (budget > 0) {
                 body.thinking = { type: 'enabled', budget_tokens: budget };
@@ -1594,9 +1607,16 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
         }
     }
 
+    // Copilot + Effort auto-URL: effort 활성화 시 /v1/messages 엔드포인트로 자동 전환
+    let effectiveUrl = config.url;
+    if (config.url && config.url.includes('githubcopilot.com') && config.effort && config.effort !== 'none') {
+        effectiveUrl = 'https://api.githubcopilot.com/v1/messages';
+        console.log('[Cupcake PM] Copilot + Effort detected → URL auto-switched to /v1/messages');
+    }
+
     const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.key}` };
     // Copilot auto-detection: if URL is githubcopilot.com, auto-fetch API token + attach Copilot headers
-    if (config.url && config.url.includes('githubcopilot.com')) {
+    if (effectiveUrl && effectiveUrl.includes('githubcopilot.com')) {
         // Auto-fetch Copilot API token (exchanges stored GitHub OAuth token for short-lived API token)
         let copilotApiToken = config.copilotToken || '';
         if (!copilotApiToken) {
@@ -1612,6 +1632,10 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
         headers['X-Request-Id'] = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString();
         headers['Editor-Version'] = 'vscode/1.109.2';
         headers['Editor-Plugin-Version'] = 'copilot-chat/0.37.4';
+        // Copilot + Effort: /v1/messages 엔드포인트는 Anthropic 형식이므로 anthropic-version 헤더 추가
+        if (config.effort && config.effort !== 'none') {
+            headers['anthropic-version'] = '2023-06-01';
+        }
         // Copilot-Vision-Request header: detect vision content in messages
         if (body.messages && body.messages.some(m => Array.isArray(m?.content) && m.content.some(p => p.type === 'image_url'))) {
             headers['Copilot-Vision-Request'] = 'true';
@@ -1624,13 +1648,13 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
     if (useStreaming) {
         // Build streaming request
         const streamBody = { ...body };
-        let streamUrl = config.url;
+        let streamUrl = effectiveUrl;
 
         if (format === 'anthropic') {
             streamBody.stream = true;
         } else if (format === 'google') {
             // Switch endpoint to streamGenerateContent
-            streamUrl = config.url.replace(':generateContent', ':streamGenerateContent');
+            streamUrl = effectiveUrl.replace(':generateContent', ':streamGenerateContent');
             if (!streamUrl.includes('alt=')) streamUrl += (streamUrl.includes('?') ? '&' : '?') + 'alt=sse';
         } else {
             // OpenAI-compatible
@@ -1707,7 +1731,7 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
     }
 
     // --- Non-streaming (decoupled) fallback ---
-    const res = await smartNativeFetch(config.url, {
+    const res = await smartNativeFetch(effectiveUrl, {
         method: 'POST',
         headers,
         body: sanitizeBodyJSON(safeStringify(body))
@@ -1810,7 +1834,8 @@ async function fetchByProviderId(modelDef, args, abortSignal) {
                 reasoning: cDef.reasoning || 'none', verbosity: cDef.verbosity || 'none',
                 thinking_level: cDef.thinking || 'none', tok: cDef.tok || 'o200k_base',
                 decoupled: !!cDef.decoupled, thought: !!cDef.thought,
-                customParams: cDef.customParams || '', copilotToken: ''
+                customParams: cDef.customParams || '', copilotToken: '',
+                effort: cDef.effort || 'none'
             }, messages, temp, maxTokens, args, abortSignal);
         }
         return { success: false, content: `[Cupcake PM] Unknown provider selected: ${modelDef.provider}` };
@@ -2161,6 +2186,7 @@ async function handleRequest(args, activeModelDef, abortSignal) {
             const reasoningList = [{ value: 'none', text: 'None (없음)' }, { value: 'off', text: 'Off (끄기)' }, { value: 'low', text: 'Low (낮음)' }, { value: 'medium', text: 'Medium (중간)' }, { value: 'high', text: 'High (높음)' }];
             const verbosityList = [{ value: 'none', text: 'None (기본값)' }, { value: 'low', text: 'Low (낮음)' }, { value: 'medium', text: 'Medium (중간)' }, { value: 'high', text: 'High (높음)' }];
             const thinkingList = [{ value: 'off', text: 'Off (끄기)' }, { value: 'none', text: 'None (없음)' }, { value: 'MINIMAL', text: 'Minimal (최소)' }, { value: 'LOW', text: 'Low (낮음)' }, { value: 'MEDIUM', text: 'Medium (중간)' }, { value: 'HIGH', text: 'High (높음)' }];
+            const effortList = [{ value: 'none', text: '사용 안함 (Off)' }, { value: 'unspecified', text: '미지정 (Unspecified)' }, { value: 'low', text: 'Low (낮음)' }, { value: 'medium', text: 'Medium (중간)' }, { value: 'high', text: 'High (높음)' }, { value: 'max', text: 'Max (최대)' }];
 
             const renderAuxParams = async (slot) => `
                     <div class="mt-8 pt-6 border-t border-gray-800 space-y-2">
@@ -2317,7 +2343,13 @@ async function handleRequest(args, activeModelDef, abortSignal) {
                                         ${verbosityList.map(o => `<option value="${o.value}">${o.text}</option>`).join('')}
                                     </select>
                                 </div>
-                                <div></div> <!-- spacing -->
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-400 mb-1">Anthropic Effort (앤트로픽 어댑티브 수준)</label>
+                                    <select id="cpm-cm-effort" class="w-full bg-gray-800 border border-gray-600 rounded px-3 py-2 text-white">
+                                        ${effortList.map(o => `<option value="${o.value}">${o.text}</option>`).join('')}
+                                    </select>
+                                    <p class="text-xs text-yellow-400 mt-1">⚡ Copilot URL인 경우, 활성화 시 자동으로 /v1/messages 엔드포인트로 전환됩니다.</p>
+                                </div>
                                 
                                 <div class="md:col-span-2 mt-4 border-t border-gray-800 pt-4">
                                     <h5 class="text-sm font-bold text-gray-300 mb-3">Custom Formatter Flags (커스텀 포맷터 설정)</h5>
@@ -2687,6 +2719,7 @@ async function handleRequest(args, activeModelDef, abortSignal) {
                     document.getElementById('cpm-cm-thinking').value = m.thinking || 'none';
                     document.getElementById('cpm-cm-reasoning').value = m.reasoning || 'none';
                     document.getElementById('cpm-cm-verbosity').value = m.verbosity || 'none';
+                    document.getElementById('cpm-cm-effort').value = m.effort || 'none';
 
                     document.getElementById('cpm-cm-sysfirst').checked = !!m.sysfirst;
                     document.getElementById('cpm-cm-mergesys').checked = !!m.mergesys;
@@ -2761,6 +2794,7 @@ async function handleRequest(args, activeModelDef, abortSignal) {
                 document.getElementById('cpm-cm-thinking').value = 'none';
                 document.getElementById('cpm-cm-reasoning').value = 'none';
                 document.getElementById('cpm-cm-verbosity').value = 'none';
+                document.getElementById('cpm-cm-effort').value = 'none';
 
                 ['sysfirst', 'mergesys', 'altrole', 'mustuser', 'maxout', 'decoupled', 'thought'].forEach(id => document.getElementById(`cpm-cm-${id}`).checked = false);
                 document.getElementById('cpm-cm-custom-params').value = '';
@@ -2789,6 +2823,7 @@ async function handleRequest(args, activeModelDef, abortSignal) {
                     thinking: document.getElementById('cpm-cm-thinking').value,
                     reasoning: document.getElementById('cpm-cm-reasoning').value,
                     verbosity: document.getElementById('cpm-cm-verbosity').value,
+                    effort: document.getElementById('cpm-cm-effort').value,
                     sysfirst: document.getElementById('cpm-cm-sysfirst').checked,
                     mergesys: document.getElementById('cpm-cm-mergesys').checked,
                     altrole: document.getElementById('cpm-cm-altrole').checked,
