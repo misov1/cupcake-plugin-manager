@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.10.13
+//@version 1.10.14
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.10.13';
+const CPM_VERSION = '1.10.14';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -347,6 +347,7 @@ async function smartNativeFetch(url, options = {}) {
     // receives a Uint8Array and uses it directly (no re-encoding step).
     // The Uint8Array's underlying ArrayBuffer is TRANSFERRED (zero-copy) across the bridge,
     // which is both faster and avoids any string handling edge cases.
+    let proxyErrorResponse = null; // Save proxy error response for fallback if Strategy 3 also fails
     try {
         console.log(`[CupcakePM] Using nativeFetch (proxy) for ${url.substring(0, 60)}...`);
         const nfOptions = { ...options };
@@ -356,18 +357,16 @@ async function smartNativeFetch(url, options = {}) {
         const res = await Risuai.nativeFetch(url, nfOptions);
 
         // Check for proxy-level failures that risuFetch (direct) could bypass:
+        // For 403/502/503: ALWAYS try Strategy 3 (direct from host window).
+        // The cloud proxy (sv.risuai.xyz) may be blocked by upstream APIs
+        // (e.g., Anthropic blocks CloudFlare proxy IPs with "Request not allowed").
+        // Strategy 3 uses the user's real IP, bypassing proxy restrictions.
         if (!res.ok && (res.status === 403 || res.status === 502 || res.status === 503)) {
             let errText = '';
             try { errText = await res.clone().text(); } catch {}
-            const isProxyRegionError = errText.includes('Country') || errText.includes('region') ||
-                errText.includes('territory') || errText.includes('not supported') ||
-                errText.includes('blocked') || errText.includes('proxy');
-            if (isProxyRegionError) {
-                console.log(`[CupcakePM] nativeFetch proxy region/block error (${res.status}), trying risuFetch direct...`);
-                // Fall through to Strategy 3
-            } else {
-                return res;
-            }
+            console.log(`[CupcakePM] nativeFetch proxy error (${res.status}), trying risuFetch direct...`);
+            proxyErrorResponse = res; // Save for fallback
+            // Fall through to Strategy 3
         } else if (!res.ok && res.status === 400) {
             // ── Null-message corruption detection ──
             let errText = '';
@@ -471,6 +470,13 @@ async function smartNativeFetch(url, options = {}) {
         } catch (e) {
             console.log(`[CupcakePM] risuFetch fallback error: ${e.message}`);
         }
+    }
+
+    // If Strategy 3 didn't return and we have a saved proxy response, return it
+    // (the error is likely a real API error, not a proxy issue)
+    if (proxyErrorResponse) {
+        console.log(`[CupcakePM] Strategy 3 failed, returning original proxy response (status=${proxyErrorResponse.status})`);
+        return proxyErrorResponse;
     }
 
     // Final fallback: try nativeFetch one more time (shouldn't reach here normally)

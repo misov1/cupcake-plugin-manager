@@ -1,5 +1,5 @@
 // @name CPM Provider - Anthropic
-// @version 1.5.0
+// @version 1.5.1
 // @description Anthropic Claude provider for Cupcake PM (Streaming)
 // @icon 🟠
 // @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-anthropic.js
@@ -53,7 +53,7 @@
 
                     const res = await CPM.smartFetch(url, {
                         method: 'GET',
-                        headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' }
+                        headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' }
                     });
                     if (!res.ok) return null;
 
@@ -125,7 +125,7 @@
             const fetchFn = typeof CPM.smartNativeFetch === 'function' ? CPM.smartNativeFetch : Risuai.nativeFetch;
             const res = await fetchFn(url, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'x-api-key': config.key, 'anthropic-version': '2023-06-01' },
+                headers: { 'Content-Type': 'application/json', 'x-api-key': config.key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
                 body: JSON.stringify(body)
             });
             if (!res.ok) return { success: false, content: `[Anthropic Error ${res.status}] ${await res.text()}` };
