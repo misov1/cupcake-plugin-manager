@@ -1,6 +1,6 @@
 {
     "CPM Provider - Vertex AI": {
-        "version": "1.5.3",
+        "version": "1.5.4",
         "file": "cpm-provider-vertex.js"
     },
     "CPM Provider - Gemini Studio": {

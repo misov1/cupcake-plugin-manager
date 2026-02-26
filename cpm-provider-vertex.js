@@ -1,5 +1,5 @@
 //@name CPM Provider - Vertex AI
-//@version 1.5.3
+//@version 1.5.4
 //@description Google Vertex AI (Service Account) provider for Cupcake PM (Streaming, Key Rotation)
 //@icon 🔷
 //@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-vertex.js
@@ -103,7 +103,7 @@
                 let allModels = [];
                 let pageToken = null;
                 while (true) {
-                    let url = `${baseUrl}/v1beta1/publishers/google/models?pageSize=100`;
+                    let url = `${baseUrl}/v1/publishers/google/models?pageSize=100`;
                     if (pageToken) url += `&pageToken=${encodeURIComponent(pageToken)}`;
                     const res = await CPM.smartFetch(url, {
                         method: 'GET',
@@ -134,7 +134,7 @@
                 // Also list Claude models available via Vertex (Model Garden)
                 // These use a different endpoint pattern
                 try {
-                    const claudeUrl = `${baseUrl}/v1beta1/projects/${project}/locations/${loc}/publishers/anthropic/models`;
+                    const claudeUrl = `${baseUrl}/v1/projects/${project}/locations/${loc}/publishers/anthropic/models`;
                     const claudeRes = await CPM.smartFetch(claudeUrl, {
                         method: 'GET',
                         headers: { 'Authorization': `Bearer ${accessToken}` }
@@ -193,7 +193,7 @@
 
                 if (isClaude) {
                     // ── Claude on Vertex (Model Garden) ── streamRawPredict ──
-                    const url = `${baseUrl}/v1beta1/projects/${project}/locations/${loc}/publishers/anthropic/models/${model}:streamRawPredict`;
+                    const url = `${baseUrl}/v1/projects/${project}/locations/${loc}/publishers/anthropic/models/${model}:streamRawPredict`;
                     const { messages: formattedMsgs, system: systemPrompt } = CPM.formatToAnthropic(messages, config);
                     const body = {
                         anthropic_version: 'vertex-2023-10-16',
@@ -228,7 +228,7 @@
                 }
 
                 // ── Gemini models ── streamGenerateContent ──
-                const url = `${baseUrl}/v1beta1/projects/${project}/locations/${loc}/publishers/google/models/${model}:streamGenerateContent?alt=sse`;
+                const url = `${baseUrl}/v1/projects/${project}/locations/${loc}/publishers/google/models/${model}:streamGenerateContent?alt=sse`;
 
                 const { contents, systemInstruction: sys } = CPM.formatToGemini(messages, config);
                 const body = { contents, generationConfig: { temperature: temp, maxOutputTokens: maxTokens } };
