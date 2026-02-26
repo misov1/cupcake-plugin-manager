@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.14.5
+//@version 1.14.6
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.14.5';
+const CPM_VERSION = '1.14.6';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -662,19 +662,19 @@ const SubPluginManager = {
      */
     async showUpdateToast(updates) {
         try {
-            // Must use getRootDocument to escape the sandboxed iframe
-            let doc;
-            try {
-                doc = await risuai.getRootDocument();
-            } catch (_) {}
-            if (!doc) doc = document;
+            // getRootDocument returns SafeElement proxies — must use async SafeElement API
+            const doc = await risuai.getRootDocument();
+            if (!doc) {
+                console.debug('[CPM Toast] getRootDocument returned null');
+                return;
+            }
 
             // Remove previous toast if exists
-            const existing = doc.getElementById('cpm-update-toast');
-            if (existing) existing.remove();
+            const existing = await doc.querySelector('[x-cpm-update-toast]');
+            if (existing) await existing.remove();
 
             const count = updates.length;
-            // Build change summary (max 3 items shown)
+            // Build change summary HTML (max 3 items)
             let detailLines = '';
             const showMax = Math.min(count, 3);
             for (let i = 0; i < showMax; i++) {
@@ -686,20 +686,10 @@ const SubPluginManager = {
                 detailLines += `<div style="font-size:11px;color:#6b7280;margin-top:2px;">...외 ${count - showMax}개</div>`;
             }
 
-            const toast = doc.createElement('div');
-            toast.id = 'cpm-update-toast';
-            toast.innerHTML = `
-                <div style="display:flex;align-items:flex-start;gap:10px;">
-                    <div style="font-size:20px;line-height:1;flex-shrink:0;">🧁</div>
-                    <div style="flex:1;min-width:0;">
-                        <div style="font-size:13px;font-weight:600;color:#e5e7eb;">서브 플러그인 업데이트 ${count}개 있음</div>
-                        ${detailLines}
-                        <div style="font-size:11px;color:#6b7280;margin-top:4px;">설정 → 서브 플러그인 탭에서 업데이트하세요</div>
-                    </div>
-                    <button id="cpm-update-toast-close" style="background:none;border:none;color:#6b7280;font-size:16px;cursor:pointer;padding:0 2px;line-height:1;flex-shrink:0;" title="닫기">✕</button>
-                </div>
-            `;
-            toast.style.cssText = `
+            // Create toast container via SafeElement API
+            const toast = await doc.createElement('div');
+            await toast.setAttribute('x-cpm-update-toast', '1');
+            await toast.setStyleAttribute(`
                 position: fixed;
                 bottom: 20px;
                 right: 20px;
@@ -717,26 +707,40 @@ const SubPluginManager = {
                 transform: translateY(12px);
                 transition: opacity 0.3s ease, transform 0.3s ease;
                 pointer-events: auto;
-            `;
-            doc.body.appendChild(toast);
+            `);
+            await toast.setInnerHTML(`
+                <div style="display:flex;align-items:flex-start;gap:10px;">
+                    <div style="font-size:20px;line-height:1;flex-shrink:0;">🧁</div>
+                    <div style="flex:1;min-width:0;">
+                        <div style="font-size:13px;font-weight:600;color:#e5e7eb;">서브 플러그인 업데이트 ${count}개 있음</div>
+                        ${detailLines}
+                        <div style="font-size:11px;color:#6b7280;margin-top:4px;">설정 → 서브 플러그인 탭에서 업데이트하세요</div>
+                    </div>
+                </div>
+            `);
 
-            // Animate in (use setTimeout for cross-document safety)
-            setTimeout(() => {
-                toast.style.opacity = '1';
-                toast.style.transform = 'translateY(0)';
-            }, 30);
+            // Append to body
+            const body = await doc.querySelector('body');
+            if (body) await body.appendChild(toast);
 
-            // Close button
-            const closeBtn = doc.getElementById('cpm-update-toast-close');
-            const dismiss = () => {
-                toast.style.opacity = '0';
-                toast.style.transform = 'translateY(12px)';
-                setTimeout(() => toast.remove(), 300);
-            };
-            if (closeBtn) closeBtn.addEventListener('click', dismiss);
+            // Animate in after brief delay
+            setTimeout(async () => {
+                try {
+                    await toast.setStyle('opacity', '1');
+                    await toast.setStyle('transform', 'translateY(0)');
+                } catch (_) {}
+            }, 50);
 
-            // Auto-dismiss after 8 seconds
-            setTimeout(dismiss, 8000);
+            // Auto-dismiss after 8 seconds (fade out then remove)
+            setTimeout(async () => {
+                try {
+                    await toast.setStyle('opacity', '0');
+                    await toast.setStyle('transform', 'translateY(12px)');
+                    setTimeout(async () => {
+                        try { await toast.remove(); } catch (_) {}
+                    }, 350);
+                } catch (_) {}
+            }, 8000);
         } catch (e) {
             console.debug('[CPM Toast] Failed to show toast:', e.message);
         }
