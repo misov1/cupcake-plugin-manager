@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.10.8
+//@version 1.10.9
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.10.8';
+const CPM_VERSION = '1.10.9';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -1623,9 +1623,21 @@ async function fetchByProviderId(modelDef, args, abortSignal) {
     //   1. CPM slot overrides (cpm_slot_<slot>_temp etc.) — applied in handleRequest()
     //   2. RisuAI separate parameters (db.seperateParameters[mode]) — applied by applyParameters() before plugin call
     //   3. RisuAI main parameters (db.temperature etc.) — applied by applyParameters() when separate params disabled
-    //   4. Fallback defaults (0.7 / 4096) — only when none of the above provide a value
-    const temp = args.temperature ?? 0.7;
-    const maxTokens = args.max_tokens ?? 4096;
+    //   4. CPM global fallback defaults (cpm_fallback_temp etc.) — user-configurable in CPM settings
+    //   5. Absolute hardcoded defaults (0.7 / 4096) — only when NOTHING else provides a value
+    const cpmFallbackTemp = await safeGetArg('cpm_fallback_temp');
+    const cpmFallbackMaxTokens = await safeGetArg('cpm_fallback_max_tokens');
+    const cpmFallbackTopP = await safeGetArg('cpm_fallback_top_p');
+    const cpmFallbackFreqPen = await safeGetArg('cpm_fallback_freq_pen');
+    const cpmFallbackPresPen = await safeGetArg('cpm_fallback_pres_pen');
+
+    const temp = args.temperature ?? (cpmFallbackTemp !== '' ? parseFloat(cpmFallbackTemp) : 0.7);
+    const maxTokens = args.max_tokens ?? (cpmFallbackMaxTokens !== '' ? parseInt(cpmFallbackMaxTokens) : 4096);
+
+    // Apply CPM global fallbacks for optional params (only when RisuAI didn't provide them)
+    if (args.top_p === undefined && cpmFallbackTopP !== '') args.top_p = parseFloat(cpmFallbackTopP);
+    if (args.frequency_penalty === undefined && cpmFallbackFreqPen !== '') args.frequency_penalty = parseFloat(cpmFallbackFreqPen);
+    if (args.presence_penalty === undefined && cpmFallbackPresPen !== '') args.presence_penalty = parseFloat(cpmFallbackPresPen);
 
     // Diagnostic: log parameter values received from RisuAI (helps debug separate params issues)
     console.log(`[Cupcake PM] 📊 Parameters for ${modelDef.name}: temp=${args.temperature}→${temp}, max_tokens=${args.max_tokens}→${maxTokens}, top_p=${args.top_p}, freq_pen=${args.frequency_penalty}, pres_pen=${args.presence_penalty}, top_k=${args.top_k}, rep_pen=${args.repetition_penalty}, min_p=${args.min_p}`);
@@ -1709,25 +1721,26 @@ async function handleRequest(args, activeModelDef, abortSignal) {
         console.log(`[Cupcake PM] Aux slot detected: '${slot}' for model '${activeModelDef.name}'`);
 
         // Override generation params if provided for this slot.
-        // Empty string = don't override (keep RisuAI's value).
-        // '0' (string) is truthy, so explicit 0 values ARE applied.
+        // Empty string = don't override (keep RisuAI's value or CPM global fallback).
+        // IMPORTANT: Use !== '' check, not truthiness, to allow explicit 0 values.
+        // safeGetArg returns '' for unset fields, '0' for explicit zero.
         const maxOut = await safeGetArg(`cpm_slot_${slot}_max_out`);
         const maxCtx = await safeGetArg(`cpm_slot_${slot}_max_context`);
-        const temp = await safeGetArg(`cpm_slot_${slot}_temp`);
+        const slotTemp = await safeGetArg(`cpm_slot_${slot}_temp`);
         const topP = await safeGetArg(`cpm_slot_${slot}_top_p`);
         const topK = await safeGetArg(`cpm_slot_${slot}_top_k`);
         const repPen = await safeGetArg(`cpm_slot_${slot}_rep_pen`);
         const freqPen = await safeGetArg(`cpm_slot_${slot}_freq_pen`);
         const presPen = await safeGetArg(`cpm_slot_${slot}_pres_pen`);
 
-        if (maxOut) args.max_tokens = parseInt(maxOut);
-        if (maxCtx) args.max_context_tokens = parseInt(maxCtx);
-        if (temp) args.temperature = parseFloat(temp);
-        if (topP) args.top_p = parseFloat(topP);
-        if (topK) args.top_k = parseInt(topK);
-        if (repPen) args.repetition_penalty = parseFloat(repPen);
-        if (freqPen) args.frequency_penalty = parseFloat(freqPen);
-        if (presPen) args.presence_penalty = parseFloat(presPen);
+        if (maxOut !== '') args.max_tokens = parseInt(maxOut);
+        if (maxCtx !== '') args.max_context_tokens = parseInt(maxCtx);
+        if (slotTemp !== '') args.temperature = parseFloat(slotTemp);
+        if (topP !== '') args.top_p = parseFloat(topP);
+        if (topK !== '') args.top_k = parseInt(topK);
+        if (repPen !== '') args.repetition_penalty = parseFloat(repPen);
+        if (freqPen !== '') args.frequency_penalty = parseFloat(freqPen);
+        if (presPen !== '') args.presence_penalty = parseFloat(presPen);
 
         console.log(`[Cupcake PM] 📝 After CPM slot overrides — temp=${args.temperature}, top_p=${args.top_p}, freq_pen=${args.frequency_penalty}, pres_pen=${args.presence_penalty}, max_tokens=${args.max_tokens}`);
     }
@@ -1969,7 +1982,10 @@ async function handleRequest(args, activeModelDef, abortSignal) {
                     
                     <div id="cpm-mobile-dropdown" class="hidden md:flex flex-col absolute md:static top-full left-0 w-full md:w-auto bg-gray-900 border-b border-gray-700 md:border-none shadow-xl md:shadow-none z-[100] h-auto max-h-[70vh] md:max-h-none md:h-full overflow-hidden flex-1">
                         <div class="flex-1 overflow-y-auto py-2 pr-2" id="cpm-tab-list">
-                        <div class="px-4 text-[11px] font-bold text-gray-500 uppercase tracking-wider mb-2 mt-2">Aux Slots (Map Mode)</div>
+                        <div class="px-4 text-[11px] font-bold text-gray-500 uppercase tracking-wider mb-2 mt-2">Common</div>
+                        <button class="w-full text-left px-5 py-2 text-sm hover:bg-gray-800 transition-colors focus:outline-none tab-btn text-cyan-300 font-semibold" data-target="tab-global">🎛️ 글로벌 기본값</button>
+                        
+                        <div class="px-4 text-[11px] font-bold text-gray-500 uppercase tracking-wider mb-2 mt-4">Aux Slots (Map Mode)</div>
                         <button class="w-full text-left px-5 py-2 text-sm hover:bg-gray-800 transition-colors focus:outline-none tab-btn" data-target="tab-trans">🌐 번역 (Trans)</button>
                         <button class="w-full text-left px-5 py-2 text-sm hover:bg-gray-800 transition-colors focus:outline-none tab-btn" data-target="tab-emo">😊 감정 판독 (Emotion)</button>
                         <button class="w-full text-left px-5 py-2 text-sm hover:bg-gray-800 transition-colors focus:outline-none tab-btn" data-target="tab-mem">🧠 하이파 (Mem)</button>
@@ -2053,6 +2069,34 @@ async function handleRequest(args, activeModelDef, abortSignal) {
                         ${await renderInput('cpm_slot_memory', '하이파 전담 모델 (Memory/Summarize)', 'select', providersList)}
                         ${await renderAuxParams('memory')}
                     </div>
+                    <div id="tab-global" class="cpm-tab-content">
+                        <h3 class="text-3xl font-bold text-cyan-400 mb-6 pb-3 border-b border-gray-700">🎛️ 글로벌 기본값 (Global Fallback Parameters)</h3>
+                        <p class="text-cyan-300 font-semibold mb-4 border-l-4 border-cyan-500 pl-4 py-1">
+                            리스AI가 파라미터를 보내지 않을 때 (파라미터 분리 ON + 미설정 등) 여기 값이 사용됩니다.
+                        </p>
+                        <div class="bg-gray-800 border border-gray-700 rounded-lg p-4 mb-6">
+                            <h4 class="text-sm font-bold text-gray-300 mb-3">📋 파라미터 우선순위 (높은 순서)</h4>
+                            <div class="text-xs text-gray-400 space-y-1">
+                                <div class="flex items-center"><span class="bg-purple-600 text-white w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold mr-2 shrink-0">1</span> CPM 슬롯 오버라이드 (번역/감정/하이파/기타 탭에서 모델 지정 + 파라미터 설정)</div>
+                                <div class="flex items-center"><span class="bg-blue-600 text-white w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold mr-2 shrink-0">2</span> 리스AI 파라미터 분리 값 (리스AI 설정에서 보조모델별 파라미터 설정)</div>
+                                <div class="flex items-center"><span class="bg-green-600 text-white w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold mr-2 shrink-0">3</span> 리스AI 메인 모델 파라미터 (파라미터 분리 꺼짐일 때)</div>
+                                <div class="flex items-center"><span class="bg-cyan-600 text-white w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold mr-2 shrink-0">4</span> <strong class="text-cyan-300">⭐ 여기: CPM 글로벌 기본값</strong></div>
+                                <div class="flex items-center"><span class="bg-gray-600 text-white w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold mr-2 shrink-0">5</span> 하드코딩 기본값 (Temperature 0.7 / Max Tokens 4096)</div>
+                            </div>
+                        </div>
+                        <p class="text-xs text-gray-500 mb-6">
+                            💡 <strong>사용 예시:</strong> 리스AI에서 파라미터 분리를 켜고 보조모델 파라미터를 설정하지 않았을 때,<br/>
+                            여기 글로벌 기본값이 하드코딩 0.7 대신 사용됩니다. 비워두면 기존처럼 0.7/4096이 적용됩니다.
+                        </p>
+                        <div class="space-y-2">
+                            ${await renderInput('cpm_fallback_temp', 'Default Temperature (기본 온도, 비워두면 0.7)', 'number')}
+                            ${await renderInput('cpm_fallback_max_tokens', 'Default Max Output Tokens (기본 최대 응답, 비워두면 4096)', 'number')}
+                            ${await renderInput('cpm_fallback_top_p', 'Default Top P (기본 Top P, 비워두면 API 기본값)', 'number')}
+                            ${await renderInput('cpm_fallback_freq_pen', 'Default Frequency Penalty (기본 빈도 페널티, 비워두면 API 기본값)', 'number')}
+                            ${await renderInput('cpm_fallback_pres_pen', 'Default Presence Penalty (기본 존재 페널티, 비워두면 API 기본값)', 'number')}
+                        </div>
+                    </div>
+
                     <div id="tab-other" class="cpm-tab-content hidden">
                         <h3 class="text-3xl font-bold mb-6 pb-3 border-b border-gray-700">트리거/루아 백그라운드 설정 (Other)</h3>
                         ${await renderInput('cpm_slot_other', 'Lua 스크립트 등 무거운 유틸 전담 모델 (Other/Trigger)', 'select', providersList)}

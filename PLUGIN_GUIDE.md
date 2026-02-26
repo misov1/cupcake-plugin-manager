@@ -1,7 +1,7 @@
 # Cupcake Provider Manager — Sub-Plugin Development Guide
 
 > **Last Updated:** 2026-02-26  
-> **CPM Version:** 1.10.8+  
+> **CPM Version:** 1.10.9+  
 > **RisuAI Compatibility:** V3 (iframe-sandboxed plugins)
 
 ---
