@@ -1,7 +1,7 @@
 //@name CPM Component - Chat Input Resizer
 //@display-name Cupcake UI Resizer
 //@api 3.0
-//@version 0.1.8
+//@version 0.1.9
 //@author Cupcake
 //@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-chat-resizer.js
 
@@ -240,7 +240,7 @@
 
                         if (!isMaximized) {
                             isMaximized = true;
-                            await btn.setInnerHTML('✖️');
+                            await btn.setInnerHTML('🧁');
                             await ta.setAttribute('x-cpm-maximized', 'true');
                             await btn.setAttribute('x-cpm-maximized-btn', 'true');
                         } else {

@@ -28,7 +28,7 @@
         "file": "cpm-provider-aws.js"
     },
     "CPM Component - Chat Input Resizer": {
-        "version": "0.1.8",
+        "version": "0.1.9",
         "file": "cpm-chat-resizer.js"
     },
     "CPM Component - Copilot Token Manager": {
