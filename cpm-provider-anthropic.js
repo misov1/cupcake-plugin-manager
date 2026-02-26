@@ -1,4 +1,5 @@
 //@name CPM Provider - Anthropic
+//@api 3.0
 //@version 1.6.1
 //@description Anthropic Claude provider for Cupcake PM (Streaming, Key Rotation)
 //@icon 🟠

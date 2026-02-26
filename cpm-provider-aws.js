@@ -1,4 +1,5 @@
 //@name CPM Provider - AWS Bedrock
+//@api 3.0
 //@version 1.4.1
 //@description AWS Bedrock (Claude) provider for Cupcake PM (Streaming)
 //@icon 🔶

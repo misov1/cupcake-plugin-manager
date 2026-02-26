@@ -1,4 +1,5 @@
 //@name CPM Provider - Vertex AI
+//@api 3.0
 //@version 1.5.0
 //@description Google Vertex AI (Service Account) provider for Cupcake PM (Streaming, Key Rotation)
 //@icon 🔷

@@ -1,4 +1,5 @@
 //@name CPM Provider - DeepSeek
+//@api 3.0
 //@version 1.4.0
 //@description DeepSeek provider for Cupcake PM (Streaming, Key Rotation)
 //@icon 🟣
