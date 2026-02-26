@@ -1,8 +1,8 @@
-// @name CPM Provider - AWS Bedrock
-// @version 1.4.1
-// @description AWS Bedrock (Claude) provider for Cupcake PM (Streaming)
-// @icon 🔶
-// @update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-aws.js
+//@name CPM Provider - AWS Bedrock
+//@version 1.4.1
+//@description AWS Bedrock (Claude) provider for Cupcake PM (Streaming)
+//@icon 🔶
+//@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-aws.js
 
 (() => {
     const CPM = window.CupcakePM;
