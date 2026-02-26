@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.14.3
+//@version 1.14.4
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.14.3';
+const CPM_VERSION = '1.14.4';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -576,7 +576,7 @@ const SubPluginManager = {
     // No code is downloaded — just version numbers compared. Runs once per session with cooldown.
 
     VERSIONS_URL: 'https://cupcake-plugin-manager.vercel.app/api/versions',
-    _VERSION_CHECK_COOLDOWN: 3600000, // 1시간 (ms)
+    _VERSION_CHECK_COOLDOWN: 600000, // 10분 (ms)
     _VERSION_CHECK_STORAGE_KEY: 'cpm_last_version_check',
     _pendingUpdateNames: [], // Store names for settings UI badge
 
