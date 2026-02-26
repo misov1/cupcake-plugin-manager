@@ -50,8 +50,8 @@
         "changes": ""
     },
     "CPM Prompt Toggle Manager": {
-        "version": "3.0.2",
+        "version": "3.0.3",
         "file": "cpm-prompt-toggle-manager.js",
-        "changes": ""
+        "changes": "@update-url 추가"
     }
 }
