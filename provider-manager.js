@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.14.7
+//@version 1.14.8
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.14.7';
+const CPM_VERSION = '1.14.8';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -1948,7 +1948,11 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
     }
 
     // --- Streaming support ---
-    const useStreaming = !config.decoupled;
+    // decoupled: per-model flag to force non-streaming
+    // cpm_streaming_enabled: global streaming toggle from user settings
+    // Only send stream:true to API when BOTH allow it
+    const streamingEnabled = await safeGetBoolArg('cpm_streaming_enabled', false);
+    const useStreaming = !config.decoupled && streamingEnabled;
 
     // Capture API request info for API View feature
     const _captureStartTime = Date.now();
