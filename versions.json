@@ -4,7 +4,7 @@
         "file": "cpm-provider-vertex.js"
     },
     "CPM Provider - Gemini Studio": {
-        "version": "1.4.0",
+        "version": "1.4.1",
         "file": "cpm-provider-gemini.js"
     },
     "CPM Provider - Anthropic": {
