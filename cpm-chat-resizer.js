@@ -1,7 +1,7 @@
 //@name CPM Component - Chat Input Resizer
 //@display-name Cupcake UI Resizer
 //@api 3.0
-//@version 0.1.4
+//@version 0.1.5
 //@author Cupcake
 //@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-chat-resizer.js
 
@@ -182,12 +182,27 @@
                 const parent = await ta.getParent();
                 if (parent && !(await parent.querySelector('.cpm-resize-btn'))) {
 
+                    // Skip textareas in the chat input bar (near send/menu SVG-icon buttons)
+                    let isChatInput = false;
+                    try {
+                        const svgBtn = await parent.querySelector('button:not(.cpm-resize-btn) svg');
+                        if (svgBtn) isChatInput = true;
+                        if (!isChatInput) {
+                            const gp = await parent.getParent();
+                            if (gp) {
+                                const svgBtn2 = await gp.querySelector('button:not(.cpm-resize-btn) svg');
+                                if (svgBtn2) isChatInput = true;
+                            }
+                        }
+                    } catch (_) {}
+                    if (isChatInput) return;
+
                     const btn = await rootDoc.createElement('button');
                     const btnId = 'cpm-btn-' + Math.random().toString(36).substring(2, 9);
                     await btn.setAttribute('x-id', btnId);
 
                     await btn.setClassName('cpm-resize-btn absolute bottom-2 right-4 text-gray-400 hover:text-white z-[100] p-1 bg-gray-800 rounded opacity-40 hover:opacity-100 transition-opacity text-xs');
-                    await btn.setInnerHTML('↕️');
+                    await btn.setInnerHTML('🧁');
                     await btn.setAttribute('x-title', '창 최대화 / 크기 조절');
 
                     let isMaximized = false;
@@ -212,12 +227,12 @@
 
                         if (!isMaximized) {
                             isMaximized = true;
-                            await btn.setInnerHTML('🔽');
+                            await btn.setInnerHTML('🧁');
                             await ta.setAttribute('x-cpm-maximized', 'true');
                             await btn.setAttribute('x-cpm-maximized-btn', 'true');
                         } else {
                             isMaximized = false;
-                            await btn.setInnerHTML('↕️');
+                            await btn.setInnerHTML('🧁');
                             await ta.setAttribute('x-cpm-maximized', 'false');
                             await btn.setAttribute('x-cpm-maximized-btn', 'false');
                         }
