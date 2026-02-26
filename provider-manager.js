@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.14.9
+//@version 1.14.10
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.14.9';
+const CPM_VERSION = '1.14.10';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -1610,9 +1610,9 @@ function parseGeminiSSELine(line, config = {}) {
         if (obj.candidates?.[0]?.content?.parts) {
             for (const part of obj.candidates[0].content.parts) {
                 if (part.thought && config.showThoughtsToken) text += `\n> [Thought Process]\n> ${part.thought}\n\n`;
-                if ((part.thoughtSignature || part.thought_signature) && config.useThoughtSignature) {
-                    text += `\n> [Signature: ${part.thoughtSignature || part.thought_signature}]\n\n`;
-                }
+                // thought_signature / thoughtSignature: internal cache key for context caching.
+                // Must NOT be included in output text — it's opaque data for request-side injection only.
+                // (LBI stores this in chat.lbi_gemini_cache and injects it into subsequent API requests.)
                 if (part.text !== undefined && !part.thought) text += part.text;
             }
         }
