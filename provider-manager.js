@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.14.2
+//@version 1.14.3
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.14.2';
+const CPM_VERSION = '1.14.3';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -569,6 +569,173 @@ const SubPluginManager = {
             if (na > nb) return -1;
         }
         return 0;
+    },
+
+    // ── Lightweight Silent Version Check (업데이트 자동 알림) ──
+    // Fetches only version manifest (~0.5KB) on startup to notify users of available updates.
+    // No code is downloaded — just version numbers compared. Runs once per session with cooldown.
+
+    VERSIONS_URL: 'https://cupcake-plugin-manager.vercel.app/api/versions',
+    _VERSION_CHECK_COOLDOWN: 3600000, // 1시간 (ms)
+    _VERSION_CHECK_STORAGE_KEY: 'cpm_last_version_check',
+    _pendingUpdateNames: [], // Store names for settings UI badge
+
+    /**
+     * Silent version check — fetches lightweight versions.json, compares with local,
+     * and shows a non-intrusive toast if updates are available.
+     * Designed to be fire-and-forget: all errors silently caught.
+     */
+    async checkVersionsQuiet() {
+        try {
+            // Session guard: only once per page load
+            if (window._cpmVersionChecked) return;
+            window._cpmVersionChecked = true;
+
+            // Cooldown guard: at most once per hour (persisted in pluginStorage)
+            try {
+                const lastCheck = await Risuai.pluginStorage.getItem(this._VERSION_CHECK_STORAGE_KEY);
+                if (lastCheck) {
+                    const elapsed = Date.now() - parseInt(lastCheck, 10);
+                    if (elapsed < this._VERSION_CHECK_COOLDOWN) {
+                        console.log(`[CPM AutoCheck] Skipped — last check ${Math.round(elapsed / 60000)}min ago (cooldown: ${this._VERSION_CHECK_COOLDOWN / 60000}min)`);
+                        return;
+                    }
+                }
+            } catch (_) { /* pluginStorage not available, proceed anyway */ }
+
+            // Fetch lightweight versions manifest (~0.5KB)
+            const cacheBuster = this.VERSIONS_URL + '?_t=' + Date.now();
+            console.log(`[CPM AutoCheck] Fetching version manifest...`);
+
+            const result = await Risuai.risuFetch(cacheBuster, {
+                method: 'GET',
+                plainFetchForce: true,
+            });
+
+            if (!result.ok) {
+                console.debug(`[CPM AutoCheck] Fetch failed (${result.status}), silently skipped.`);
+                return;
+            }
+
+            const manifest = (typeof result.data === 'string') ? JSON.parse(result.data) : result.data;
+            if (!manifest || typeof manifest !== 'object') return;
+
+            // Compare versions
+            const updatesAvailable = [];
+            for (const p of this.plugins) {
+                if (!p.updateUrl || !p.name) continue;
+                const remote = manifest[p.name];
+                if (!remote || !remote.version) continue;
+                const cmp = this.compareVersions(p.version || '0.0.0', remote.version);
+                if (cmp > 0) {
+                    updatesAvailable.push({
+                        name: p.name,
+                        icon: p.icon || '🧩',
+                        localVersion: p.version || '0.0.0',
+                        remoteVersion: remote.version,
+                        changes: remote.changes || '',
+                    });
+                }
+            }
+
+            // Save check timestamp
+            try {
+                await Risuai.pluginStorage.setItem(this._VERSION_CHECK_STORAGE_KEY, String(Date.now()));
+            } catch (_) { /* ignore */ }
+
+            if (updatesAvailable.length > 0) {
+                this._pendingUpdateNames = updatesAvailable.map(u => u.name);
+                console.log(`[CPM AutoCheck] ${updatesAvailable.length} update(s) available:`, updatesAvailable.map(u => `${u.name} ${u.localVersion}→${u.remoteVersion}`).join(', '));
+                this.showUpdateToast(updatesAvailable);
+            } else {
+                console.log(`[CPM AutoCheck] All sub-plugins up to date.`);
+            }
+        } catch (e) {
+            // Silently fail — this is a background convenience feature
+            console.debug(`[CPM AutoCheck] Silent error:`, e.message || e);
+        }
+    },
+
+    /**
+     * Show a lightweight, non-intrusive toast notification about available updates.
+     * Auto-dismisses after 8 seconds. Minimal DOM footprint.
+     */
+    showUpdateToast(updates) {
+        try {
+            // Determine target document: prefer RisuAI root document, fallback to current document
+            const doc = document;
+
+            // Remove previous toast if exists
+            const existing = doc.getElementById('cpm-update-toast');
+            if (existing) existing.remove();
+
+            const count = updates.length;
+            // Build change summary (max 3 items shown)
+            let detailLines = '';
+            const showMax = Math.min(count, 3);
+            for (let i = 0; i < showMax; i++) {
+                const u = updates[i];
+                const changeText = u.changes ? ` — ${u.changes}` : '';
+                detailLines += `<div style="font-size:11px;color:#9ca3af;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:320px;">${u.icon} ${u.name} <span style="color:#6ee7b7;">${u.localVersion} → ${u.remoteVersion}</span>${changeText}</div>`;
+            }
+            if (count > showMax) {
+                detailLines += `<div style="font-size:11px;color:#6b7280;margin-top:2px;">...외 ${count - showMax}개</div>`;
+            }
+
+            const toast = doc.createElement('div');
+            toast.id = 'cpm-update-toast';
+            toast.innerHTML = `
+                <div style="display:flex;align-items:flex-start;gap:10px;">
+                    <div style="font-size:20px;line-height:1;flex-shrink:0;">🧁</div>
+                    <div style="flex:1;min-width:0;">
+                        <div style="font-size:13px;font-weight:600;color:#e5e7eb;">서브 플러그인 업데이트 ${count}개 있음</div>
+                        ${detailLines}
+                        <div style="font-size:11px;color:#6b7280;margin-top:4px;">설정 → 서브 플러그인 탭에서 업데이트하세요</div>
+                    </div>
+                    <button id="cpm-update-toast-close" style="background:none;border:none;color:#6b7280;font-size:16px;cursor:pointer;padding:0 2px;line-height:1;flex-shrink:0;" title="닫기">✕</button>
+                </div>
+            `;
+            toast.style.cssText = `
+                position: fixed;
+                bottom: 20px;
+                right: 20px;
+                background: #1f2937;
+                border: 1px solid #374151;
+                border-left: 3px solid #3b82f6;
+                border-radius: 10px;
+                padding: 12px 14px;
+                max-width: 380px;
+                min-width: 280px;
+                box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+                z-index: 99998;
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+                opacity: 0;
+                transform: translateY(12px);
+                transition: opacity 0.3s ease, transform 0.3s ease;
+                pointer-events: auto;
+            `;
+            doc.body.appendChild(toast);
+
+            // Animate in
+            requestAnimationFrame(() => {
+                toast.style.opacity = '1';
+                toast.style.transform = 'translateY(0)';
+            });
+
+            // Close button
+            const closeBtn = doc.getElementById('cpm-update-toast-close');
+            const dismiss = () => {
+                toast.style.opacity = '0';
+                toast.style.transform = 'translateY(12px)';
+                setTimeout(() => toast.remove(), 300);
+            };
+            if (closeBtn) closeBtn.addEventListener('click', dismiss);
+
+            // Auto-dismiss after 8 seconds
+            setTimeout(dismiss, 8000);
+        } catch (e) {
+            console.debug('[CPM Toast] Failed to show toast:', e.message);
+        }
     },
 
     // ── Single-Bundle Update System ──
@@ -2175,6 +2342,12 @@ async function handleRequest(args, activeModelDef, abortSignal) {
             });
         }
 
+        // ── Silent Update Check (지연 자동 체크) ──
+        // Fire-and-forget: 5초 후 경량 버전 체크, 실패해도 무시
+        setTimeout(() => {
+            SubPluginManager.checkVersionsQuiet().catch(() => {});
+        }, 5000);
+
         // Setup the Native Sidebar UI settings
         const openCpmSettings = async () => {
             risuai.showContainer('fullscreen');
@@ -2272,7 +2445,7 @@ async function handleRequest(args, activeModelDef, abortSignal) {
                         </button>
                         
                         <div class="px-4 text-[11px] font-bold text-gray-500 uppercase tracking-wider mt-5 mb-2">Extensions</div>
-                        <button class="w-full text-left px-5 py-2 text-sm hover:bg-gray-800 transition-colors focus:outline-none tab-btn text-yellow-300 font-bold bg-yellow-900/10" data-target="tab-plugins">🧩 Sub-Plugins</button>
+                        <button class="w-full text-left px-5 py-2 text-sm hover:bg-gray-800 transition-colors focus:outline-none tab-btn text-yellow-300 font-bold bg-yellow-900/10" data-target="tab-plugins">🧩 Sub-Plugins${SubPluginManager._pendingUpdateNames.length > 0 ? ` <span style="background:#4f46e5;color:#e0e7ff;font-size:10px;padding:1px 6px;border-radius:9px;margin-left:4px;font-weight:bold;">${SubPluginManager._pendingUpdateNames.length}</span>` : ''}</button>
                         
                         </div>
                         <div class="p-4 border-t border-gray-800 space-y-2 shrink-0 bg-gray-900 z-10 relative" id="cpm-tab-footer">
@@ -2529,6 +2702,7 @@ async function handleRequest(args, activeModelDef, abortSignal) {
                             <h3 class="text-3xl font-bold text-gray-400">Sub-Plugins Manager</h3>
                             <button id="cpm-check-updates-btn" class="bg-indigo-600 hover:bg-indigo-500 text-white font-semibold py-2 px-4 rounded transition-colors text-sm shadow">🔄 서브 플러그인 업데이트 확인</button>
                         </div>
+                        ${SubPluginManager._pendingUpdateNames.length > 0 ? `<div class="bg-indigo-900/40 border border-indigo-700 rounded-lg p-3 mb-4 flex items-center gap-2"><span class="text-indigo-300 text-sm font-semibold">🔔 ${SubPluginManager._pendingUpdateNames.length}개의 서브 플러그인 업데이트가 감지되었습니다.</span><span class="text-indigo-400 text-xs">아래 "🔄 업데이트 확인" 버튼을 클릭하여 적용하세요.</span></div>` : ''}
                         <p class="text-yellow-300 font-semibold mb-4 border-l-4 border-yellow-500 pl-4 py-1">
                             Cupcake PM에 연동된 외부 확장 기능(Sub-Plugins)들을 통합 관리합니다.
                         </p>

@@ -1,42 +1,57 @@
 {
     "CPM Provider - Vertex AI": {
         "version": "1.5.4",
-        "file": "cpm-provider-vertex.js"
+        "file": "cpm-provider-vertex.js",
+        "changes": ""
     },
     "CPM Provider - Gemini Studio": {
         "version": "1.5.3",
-        "file": "cpm-provider-gemini.js"
+        "file": "cpm-provider-gemini.js",
+        "changes": ""
     },
     "CPM Provider - Anthropic": {
         "version": "1.6.2",
-        "file": "cpm-provider-anthropic.js"
+        "file": "cpm-provider-anthropic.js",
+        "changes": ""
     },
     "CPM Provider - OpenAI": {
         "version": "1.5.2",
-        "file": "cpm-provider-openai.js"
+        "file": "cpm-provider-openai.js",
+        "changes": ""
     },
     "CPM Provider - DeepSeek": {
         "version": "1.4.1",
-        "file": "cpm-provider-deepseek.js"
+        "file": "cpm-provider-deepseek.js",
+        "changes": ""
     },
     "CPM Provider - OpenRouter": {
         "version": "1.3.1",
-        "file": "cpm-provider-openrouter.js"
+        "file": "cpm-provider-openrouter.js",
+        "changes": ""
     },
     "CPM Provider - AWS Bedrock": {
         "version": "1.4.2",
-        "file": "cpm-provider-aws.js"
+        "file": "cpm-provider-aws.js",
+        "changes": ""
     },
     "CPM Component - Chat Input Resizer": {
         "version": "0.2.0",
-        "file": "cpm-chat-resizer.js"
+        "file": "cpm-chat-resizer.js",
+        "changes": ""
     },
     "CPM Component - Copilot Token Manager": {
         "version": "1.5.3",
-        "file": "cpm-copilot-manager.js"
+        "file": "cpm-copilot-manager.js",
+        "changes": ""
     },
     "CPM Component - Translation Cache Manager": {
         "version": "1.2.2",
-        "file": "cpm-translation-cache.js"
+        "file": "cpm-translation-cache.js",
+        "changes": ""
+    },
+    "CPM Prompt Toggle Manager": {
+        "version": "3.0.1",
+        "file": "cpm-prompt-toggle-manager.js",
+        "changes": ""
     }
 }
