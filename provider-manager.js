@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.10.10
+//@version 1.10.11
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.10.10';
+const CPM_VERSION = '1.10.11';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -353,6 +353,23 @@ async function smartNativeFetch(url, options = {}) {
                 // Real API error (not proxy issue) — return as-is
                 return res;
             }
+        } else if (!res.ok && res.status === 400) {
+            // ── Null-message corruption detection ──
+            // The proxy2 route (sv.risuai.xyz/proxy2) can corrupt the body in transit,
+            // causing null entries to appear in the messages array even though the body
+            // was verified clean before sending. Detect this specific error pattern
+            // and retry via Strategy 3 (direct fetch from HOST, bypassing proxy).
+            let errText = '';
+            try { errText = await res.clone().text(); } catch {}
+            const isNullMessageError = errText.includes('got null instead') && errText.includes('messages');
+            if (isNullMessageError) {
+                console.warn(`[CupcakePM] ⚠️ Null-message corruption detected via proxy route (400). Body was verified clean pre-send.`);
+                console.warn(`[CupcakePM] ↳ Error: ${errText.substring(0, 300)}`);
+                console.warn(`[CupcakePM] ↳ Retrying via direct fetch (plainFetchForce) to bypass proxy...`);
+                // Fall through to Strategy 3 (risuFetch direct — bypasses proxy entirely)
+            } else {
+                return res;
+            }
         } else {
             return res;
         }
@@ -376,9 +393,11 @@ async function smartNativeFetch(url, options = {}) {
 
             // ── Deep-sanitize body object before it crosses the postMessage bridge ──
             // The V3 bridge uses structured clone + JSON.stringify on the host side.
-            // Ensure messages/contents arrays have absolutely no null/invalid entries.
+            // Deep plain clone via JSON round-trip strips hidden toJSON, getters, prototype chains.
+            // Then filter null/invalid entries from messages/contents arrays.
             if (bodyObj && typeof bodyObj === 'object') {
                 if (Array.isArray(bodyObj.messages)) {
+                    try { bodyObj.messages = JSON.parse(JSON.stringify(bodyObj.messages)); } catch (_) {}
                     bodyObj.messages = bodyObj.messages.filter(m => {
                         if (m == null || typeof m !== 'object') return false;
                         if (m.content === null || m.content === undefined) return false;
@@ -387,6 +406,7 @@ async function smartNativeFetch(url, options = {}) {
                     });
                 }
                 if (Array.isArray(bodyObj.contents)) {
+                    try { bodyObj.contents = JSON.parse(JSON.stringify(bodyObj.contents)); } catch (_) {}
                     bodyObj.contents = bodyObj.contents.filter(m => m != null && typeof m === 'object');
                 }
             }
@@ -1428,17 +1448,35 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
         body.messages = formattedMessages;
     }
 
-    // ===== FINAL SAFETY: filter any null/undefined from messages array =====
-    // This is the absolute last defense before JSON.stringify — catches nulls
-    // from any source (RisuAI runTrigger JSON round-trip, replacerbeforeRequest, etc.)
+    // ===== FINAL SAFETY: deep-clone + filter messages array =====
+    // Deep plain clone via JSON round-trip eliminates hidden prototype chains,
+    // getters, toJSON methods, and any non-plain-object artifacts that could
+    // cause null entries to appear during serialization or proxy transit.
+    // This is the absolute last defense before JSON.stringify.
     if (body.messages) {
+        try {
+            // Deep plain clone: strips ALL non-data properties (toJSON, getters, prototype chains)
+            body.messages = JSON.parse(JSON.stringify(body.messages));
+        } catch (e) {
+            console.error('[Cupcake PM] ⚠️ Deep-clone of messages failed:', e.message);
+        }
         const before = body.messages.length;
-        body.messages = body.messages.filter(m => m != null && typeof m === 'object');
+        body.messages = body.messages.filter(m => {
+            if (m == null || typeof m !== 'object') return false;
+            if (m.content === null || m.content === undefined) return false;
+            if (typeof m.role !== 'string' || !m.role) return false;
+            return true;
+        });
         if (body.messages.length < before) {
             console.warn(`[Cupcake PM] ⚠️ Removed ${before - body.messages.length} null/invalid entries from messages array (was ${before}, now ${body.messages.length})`);
         }
     }
     if (body.contents) {
+        try {
+            body.contents = JSON.parse(JSON.stringify(body.contents));
+        } catch (e) {
+            console.error('[Cupcake PM] ⚠️ Deep-clone of contents failed:', e.message);
+        }
         const before = body.contents.length;
         body.contents = body.contents.filter(m => m != null && typeof m === 'object');
         if (body.contents.length < before) {
@@ -1528,11 +1566,19 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
             streamBody.stream = true;
         }
 
-        // Final safety: ensure no nulls in streaming body messages array
+        // Final safety: deep-clone + filter streaming body messages array
+        // Deep plain clone ensures no hidden properties survive into the final JSON
         if (streamBody.messages) {
-            streamBody.messages = streamBody.messages.filter(m => m != null && typeof m === 'object');
+            try { streamBody.messages = JSON.parse(JSON.stringify(streamBody.messages)); } catch (_) {}
+            streamBody.messages = streamBody.messages.filter(m => {
+                if (m == null || typeof m !== 'object') return false;
+                if (m.content === null || m.content === undefined) return false;
+                if (typeof m.role !== 'string' || !m.role) return false;
+                return true;
+            });
         }
         if (streamBody.contents) {
+            try { streamBody.contents = JSON.parse(JSON.stringify(streamBody.contents)); } catch (_) {}
             streamBody.contents = streamBody.contents.filter(m => m != null && typeof m === 'object');
         }
 
