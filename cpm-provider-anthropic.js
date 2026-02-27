@@ -1,5 +1,5 @@
 //@name CPM Provider - Anthropic
-//@version 1.6.2
+//@version 1.6.3
 //@description Anthropic Claude provider for Cupcake PM (Streaming, Key Rotation)
 //@icon 🟠
 //@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-anthropic.js
@@ -89,6 +89,7 @@
             };
 
             const url = config.url || 'https://api.anthropic.com/v1/messages';
+            const streamingEnabled = await CPM.safeGetBoolArg('cpm_streaming_enabled', false);
             const { messages: formattedMsgs, system: systemPrompt } = CPM.formatToAnthropic(messages, config);
 
             // Key Rotation: wrap fetch in withKeyRotation for automatic retry on 429/529
@@ -98,7 +99,7 @@
                     max_tokens: maxTokens,
                     temperature: temp,
                     messages: formattedMsgs,
-                    stream: true,
+                    stream: streamingEnabled,
                 };
                 if (args.top_p !== undefined && args.top_p !== null) body.top_p = args.top_p;
                 if (args.top_k !== undefined && args.top_k !== null) body.top_k = args.top_k;
@@ -130,7 +131,17 @@
                     body: JSON.stringify(body)
                 });
                 if (!res.ok) return { success: false, content: `[Anthropic Error ${res.status}] ${await res.text()}`, _status: res.status };
-                return { success: true, content: CPM.createAnthropicSSEStream(res, abortSignal) };
+
+                if (streamingEnabled) {
+                    return { success: true, content: CPM.createAnthropicSSEStream(res, abortSignal) };
+                } else {
+                    const data = await res.json();
+                    let showThinking = false;
+                    try { showThinking = await CPM.safeGetBoolArg('cpm_streaming_show_thinking', false); } catch { }
+                    return typeof CPM.parseClaudeNonStreamingResponse === 'function'
+                        ? CPM.parseClaudeNonStreamingResponse(data, { showThinking })
+                        : { success: true, content: (Array.isArray(data.content) ? data.content.filter(b => b.type === 'text').map(b => b.text).join('') : '') };
+                }
             };
 
             // Use key rotation if available, otherwise fall back to single key

@@ -1,5 +1,5 @@
 //@name CPM Provider - Vertex AI
-//@version 1.5.8
+//@version 1.6.1
 //@description Google Vertex AI (Service Account) provider for Cupcake PM (Streaming, Key Rotation)
 //@icon 🔷
 //@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-vertex.js
@@ -170,6 +170,7 @@
             }
         },
         fetcher: async function (modelDef, messages, temp, maxTokens, args, abortSignal) {
+            const streamingEnabled = await CPM.safeGetBoolArg('cpm_streaming_enabled', false);
             const config = {
                 location: await CPM.safeGetArg('cpm_vertex_location'),
                 model: modelDef.id,
@@ -195,8 +196,9 @@
                 const fetchFn = typeof CPM.smartNativeFetch === 'function' ? CPM.smartNativeFetch : Risuai.nativeFetch;
 
                 if (isClaude) {
-                    // ── Claude on Vertex (Model Garden) ── streamRawPredict ──
-                    const url = `${baseUrl}/v1/projects/${project}/locations/${loc}/publishers/anthropic/models/${model}:streamRawPredict`;
+                    // ── Claude on Vertex (Model Garden) ──
+                    const claudeEndpoint = streamingEnabled ? 'streamRawPredict' : 'rawPredict';
+                    const url = `${baseUrl}/v1/projects/${project}/locations/${loc}/publishers/anthropic/models/${model}:${claudeEndpoint}`;
                     const { messages: formattedMsgs, system: systemPrompt } = CPM.formatToAnthropic(messages, config);
                     const body = {
                         anthropic_version: 'vertex-2023-10-16',
@@ -204,7 +206,7 @@
                         max_tokens: maxTokens,
                         temperature: temp,
                         messages: formattedMsgs,
-                        stream: true,
+                        stream: streamingEnabled,
                     };
                     if (args.top_p !== undefined && args.top_p !== null) body.top_p = args.top_p;
                     if (args.top_k !== undefined && args.top_k !== null) body.top_k = args.top_k;
@@ -227,11 +229,28 @@
                         if (res.status === 401 || res.status === 403) invalidateTokenCache(keyJson);
                         return { success: false, content: `[Vertex Claude Error ${res.status}] ${await res.text()}`, _status: res.status };
                     }
-                    return { success: true, content: CPM.createAnthropicSSEStream(res, abortSignal) };
+
+                    if (streamingEnabled) {
+                        return { success: true, content: CPM.createAnthropicSSEStream(res, abortSignal) };
+                    } else {
+                        // Non-streaming: parse JSON response
+                        const data = await res.json();
+                        // Resolve showThinking for non-streaming display
+                        let showThinking = false;
+                        try { showThinking = await CPM.safeGetBoolArg('cpm_streaming_show_thinking', false); } catch { }
+                        if (typeof CPM.parseClaudeNonStreamingResponse === 'function') {
+                            return CPM.parseClaudeNonStreamingResponse(data, { showThinking });
+                        }
+                        // Fallback: extract text directly
+                        const text = data.content?.filter(b => b.type === 'text').map(b => b.text).join('') || '';
+                        return { success: !!text, content: text || '[Vertex Claude] Empty response' };
+                    }
                 }
 
-                // ── Gemini models ── streamGenerateContent ──
-                const url = `${baseUrl}/v1/projects/${project}/locations/${loc}/publishers/google/models/${model}:streamGenerateContent?alt=sse`;
+                // ── Gemini models ──
+                const geminiEndpoint = streamingEnabled ? 'streamGenerateContent' : 'generateContent';
+                const geminiSuffix = streamingEnabled ? '?alt=sse' : '';
+                const url = `${baseUrl}/v1/projects/${project}/locations/${loc}/publishers/google/models/${model}:${geminiEndpoint}${geminiSuffix}`;
 
                 const { contents, systemInstruction: sys } = CPM.formatToGemini(messages, config);
                 const body = { contents, generationConfig: { temperature: temp, maxOutputTokens: maxTokens } };
@@ -244,7 +263,33 @@
                     const _tc = CPM.buildGeminiThinkingConfig(model, config.thinking, config.thinkingBudget, true);
                     if (_tc) body.generationConfig.thinkingConfig = _tc;
                 } else if (config.thinking && config.thinking !== 'off' && config.thinking !== 'none') {
-                    body.generationConfig.thinkingConfig = { includeThoughts: true, thinking_level: config.thinking };
+                    body.generationConfig.thinkingConfig = { includeThoughts: true, thinkingLevel: String(config.thinking).toLowerCase() };
+                }
+
+                // Safety settings: all categories OFF (aligned with LBI pre36)
+                if (typeof CPM.getGeminiSafetySettings === 'function') {
+                    body.safetySettings = CPM.getGeminiSafetySettings();
+                }
+                // Validate and clamp parameters
+                if (typeof CPM.validateGeminiParams === 'function') {
+                    CPM.validateGeminiParams(body.generationConfig);
+                }
+                // Strip unsupported params for experimental models
+                if (typeof CPM.cleanExperimentalModelParams === 'function') {
+                    CPM.cleanExperimentalModelParams(body.generationConfig, model);
+                }
+                // Vertex AI: strip thought:true from historical parts for thinking models
+                // Vertex may reject requests with thought:true in historical message parts.
+                // Aligned with LBI pre36 (L10308-10316)
+                const isThinkingModel = model && (model.includes('gemini-2.5') || model.includes('gemini-3'));
+                if (isThinkingModel && body.contents) {
+                    body.contents = body.contents.map(content => ({
+                        ...content,
+                        parts: content.parts.map(part => {
+                            const { thought, ...rest } = part;
+                            return rest;
+                        }),
+                    }));
                 }
 
                 const res = await fetchFn(url, {
@@ -253,10 +298,47 @@
                     body: JSON.stringify(body)
                 });
                 if (!res.ok) {
+                    const errText = await res.text();
                     if (res.status === 401 || res.status === 403) invalidateTokenCache(keyJson);
-                    return { success: false, content: `[Vertex Error ${res.status}] ${await res.text()}`, _status: res.status };
+
+                    // Location fallback: try alternate locations on 404/region errors
+                    const FALLBACK_LOCATIONS = ['us-central1', 'us-east4', 'europe-west1', 'asia-northeast1'];
+                    if ((res.status === 404 || res.status === 400) && !config._triedFallback) {
+                        config._triedFallback = true;
+                        for (const fallbackLoc of FALLBACK_LOCATIONS) {
+                            if (fallbackLoc === loc) continue;
+                            const fbBaseUrl = `https://${fallbackLoc}-aiplatform.googleapis.com`;
+                            const fbUrl = `${fbBaseUrl}/v1/projects/${project}/locations/${fallbackLoc}/publishers/google/models/${model}:${geminiEndpoint}${geminiSuffix}`;
+                            try {
+                                const fbRes = await fetchFn(fbUrl, {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` },
+                                    body: JSON.stringify(body)
+                                });
+                                if (fbRes.ok) {
+                                    console.log(`[CPM-Vertex] Fallback to ${fallbackLoc} succeeded`);
+                                    if (streamingEnabled) {
+                                        return { success: true, content: CPM.createSSEStream(fbRes, (line) => CPM.parseGeminiSSELine(line, config), abortSignal) };
+                                    } else {
+                                        const fbData = await fbRes.json();
+                                        return CPM.parseGeminiNonStreamingResponse(fbData, config);
+                                    }
+                                }
+                            } catch (fbErr) {
+                                console.warn(`[CPM-Vertex] Fallback ${fallbackLoc} failed:`, fbErr.message);
+                            }
+                        }
+                    }
+
+                    return { success: false, content: `[Vertex Error ${res.status}] ${errText}`, _status: res.status };
                 }
-                return { success: true, content: CPM.createSSEStream(res, (line) => CPM.parseGeminiSSELine(line, config), abortSignal) };
+
+                if (streamingEnabled) {
+                    return { success: true, content: CPM.createSSEStream(res, (line) => CPM.parseGeminiSSELine(line, config), abortSignal) };
+                } else {
+                    const data = await res.json();
+                    return CPM.parseGeminiNonStreamingResponse(data, config);
+                }
             };
 
             // Use JSON key rotation if available, otherwise fall back to single key

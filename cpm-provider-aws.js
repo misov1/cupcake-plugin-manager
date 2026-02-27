@@ -1,5 +1,5 @@
 //@name CPM Provider - AWS Bedrock
-//@version 1.4.2
+//@version 1.4.3
 //@description AWS Bedrock (Claude) provider for Cupcake PM (Streaming)
 //@icon 🔶
 //@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-aws.js
@@ -116,6 +116,7 @@
             }
         },
         fetcher: async function (modelDef, messages, temp, maxTokens, args, abortSignal) {
+            const streamingEnabled = await CPM.safeGetBoolArg('cpm_streaming_enabled', false);
             const config = {
                 key: await CPM.safeGetArg('cpm_aws_key'),
                 secret: await CPM.safeGetArg('cpm_aws_secret'),
@@ -157,6 +158,37 @@
 
             try {
                 const AwsV4Signer = CPM.AwsV4Signer;
+
+                if (!streamingEnabled) {
+                    // ── Non-streaming: invoke endpoint → JSON response ──
+                    const invokeUrl = `https://bedrock-runtime.${config.region}.amazonaws.com/model/${config.model}/invoke`;
+                    const signer = new AwsV4Signer({
+                        method: 'POST',
+                        url: invokeUrl,
+                        accessKeyId: config.key,
+                        secretAccessKey: config.secret,
+                        service: 'bedrock',
+                        region: config.region,
+                        body: JSON.stringify(body),
+                        headers: { 'Content-Type': 'application/json', 'accept': 'application/json' }
+                    });
+                    const signed = await signer.sign();
+                    const res = await Risuai.nativeFetch(signed.url.toString(), {
+                        method: signed.method,
+                        headers: signed.headers,
+                        body: signed.body
+                    });
+                    if (!res.ok) return { success: false, content: `[AWS Bedrock Error ${res.status}] ${await res.text()}` };
+                    const data = await res.json();
+                    // Bedrock invoke returns Anthropic Messages API format
+                    let showThinking = false;
+                    try { showThinking = await CPM.safeGetBoolArg('cpm_streaming_show_thinking', false); } catch { }
+                    return typeof CPM.parseClaudeNonStreamingResponse === 'function'
+                        ? CPM.parseClaudeNonStreamingResponse(data, { showThinking })
+                        : { success: true, content: (Array.isArray(data.content) ? data.content.filter(b => b.type === 'text').map(b => b.text).join('') : '') };
+                }
+
+                // ── Streaming: invoke-with-response-stream endpoint ──
                 const streamUrl = `https://bedrock-runtime.${config.region}.amazonaws.com/model/${config.model}/invoke-with-response-stream`;
                 const signer = new AwsV4Signer({
                     method: 'POST',

@@ -1,5 +1,5 @@
 //@name CPM Provider - OpenAI
-//@version 1.5.2
+//@version 1.5.3
 //@description OpenAI provider for Cupcake PM (Streaming, Key Rotation)
 //@icon 🟢
 //@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-openai.js
@@ -89,13 +89,15 @@
             const modelName = config.model || 'gpt-4o';
             const formattedMessages = CPM.formatToOpenAI(messages, config);
 
+            const streamingEnabled = await CPM.safeGetBoolArg('cpm_streaming_enabled', false);
+
             // Key Rotation: wrap fetch in withKeyRotation for automatic retry on 429/529
             const doFetch = async (apiKey) => {
                 const body = {
                     model: modelName,
                     messages: Array.isArray(formattedMessages) ? formattedMessages.filter(m => m != null && typeof m === 'object') : [],
                     temperature: temp,
-                    stream: true,
+                    stream: streamingEnabled,
                 };
 
                 if (needsMaxCompletionTokens(modelName)) {
@@ -138,7 +140,13 @@
                 const fetchFn = typeof CPM.smartNativeFetch === 'function' ? CPM.smartNativeFetch : Risuai.nativeFetch;
                 const res = await fetchFn(url, { method: 'POST', headers, body: safeBody });
                 if (!res.ok) return { success: false, content: `[OpenAI Error ${res.status}] ${await res.text()}`, _status: res.status };
-                return { success: true, content: CPM.createSSEStream(res, CPM.parseOpenAISSELine, abortSignal) };
+
+                if (streamingEnabled) {
+                    return { success: true, content: CPM.createSSEStream(res, CPM.parseOpenAISSELine, abortSignal) };
+                } else {
+                    const data = await res.json();
+                    return { success: true, content: data.choices?.[0]?.message?.content || '' };
+                }
             };
 
             // Use key rotation if available, otherwise fall back to single key

@@ -1,5 +1,5 @@
 //@name CPM Provider - OpenRouter
-//@version 1.3.1
+//@version 1.3.2
 //@description OpenRouter provider for Cupcake PM (Streaming, Key Rotation)
 //@icon 🌐
 //@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-openrouter.js
@@ -26,9 +26,11 @@
             }
             const url = config.url || 'https://openrouter.ai/api/v1/chat/completions';
 
+            const streamingEnabled = await CPM.safeGetBoolArg('cpm_streaming_enabled', false);
+
             // Key Rotation: wrap fetch in withKeyRotation for automatic retry on 429/529
             const doFetch = async (apiKey) => {
-                const body = { model: config.model.trim(), messages: CPM.formatToOpenAI(messages), temperature: temp, max_tokens: maxTokens, stream: true };
+                const body = { model: config.model.trim(), messages: CPM.formatToOpenAI(messages), temperature: temp, max_tokens: maxTokens, stream: streamingEnabled };
                 if (args.top_p !== undefined && args.top_p !== null) body.top_p = args.top_p;
                 if (args.top_k !== undefined && args.top_k !== null) body.top_k = args.top_k;
                 if (args.frequency_penalty !== undefined && args.frequency_penalty !== null) body.frequency_penalty = args.frequency_penalty;
@@ -53,7 +55,13 @@
                     body: JSON.stringify(body)
                 });
                 if (!res.ok) return { success: false, content: `[OpenRouter Error ${res.status}] ${await res.text()}`, _status: res.status };
-                return { success: true, content: CPM.createSSEStream(res, CPM.parseOpenAISSELine, abortSignal) };
+
+                if (streamingEnabled) {
+                    return { success: true, content: CPM.createSSEStream(res, CPM.parseOpenAISSELine, abortSignal) };
+                } else {
+                    const data = await res.json();
+                    return { success: true, content: data.choices?.[0]?.message?.content || '' };
+                }
             };
 
             // Use key rotation if available, otherwise fall back to single key

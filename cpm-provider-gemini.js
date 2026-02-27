@@ -1,5 +1,5 @@
 //@name CPM Provider - Gemini Studio
-//@version 1.5.5
+//@version 1.6.1
 //@description Google Gemini Studio (API Key) provider for Cupcake PM (Streaming, Key Rotation)
 //@icon 🔵
 //@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-gemini.js
@@ -65,6 +65,7 @@
             }
         },
         fetcher: async function (modelDef, messages, temp, maxTokens, args, abortSignal) {
+            const streamingEnabled = await CPM.safeGetBoolArg('cpm_streaming_enabled', false);
             const config = {
                 model: modelDef.id,
                 thinking: await CPM.safeGetArg('cpm_gemini_thinking_level'),
@@ -79,7 +80,10 @@
 
             // Key Rotation: wrap fetch in withKeyRotation for automatic retry on 429/529
             const doFetch = async (apiKey) => {
-                const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?key=${apiKey}&alt=sse`;
+                // Use streaming or non-streaming endpoint based on cpm_streaming_enabled
+                const endpoint = streamingEnabled ? 'streamGenerateContent' : 'generateContent';
+                const urlSuffix = streamingEnabled ? '&alt=sse' : '';
+                const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:${endpoint}?key=${apiKey}${urlSuffix}`;
 
                 const body = { contents, generationConfig: { temperature: temp, maxOutputTokens: maxTokens } };
                 if (args.top_p !== undefined && args.top_p !== null) body.generationConfig.topP = args.top_p;
@@ -94,10 +98,36 @@
                     body.generationConfig.thinkingConfig = { includeThoughts: true, thinkingLevel: String(config.thinking).toLowerCase() };
                 }
 
+                // Safety settings: all categories OFF (aligned with LBI pre36)
+                if (typeof CPM.getGeminiSafetySettings === 'function') {
+                    body.safetySettings = CPM.getGeminiSafetySettings();
+                }
+                // Validate and clamp parameters
+                if (typeof CPM.validateGeminiParams === 'function') {
+                    CPM.validateGeminiParams(body.generationConfig);
+                }
+                // Strip unsupported params for experimental models
+                if (typeof CPM.cleanExperimentalModelParams === 'function') {
+                    CPM.cleanExperimentalModelParams(body.generationConfig, model);
+                }
+
                 const fetchFn = typeof CPM.smartNativeFetch === 'function' ? CPM.smartNativeFetch : Risuai.nativeFetch;
                 const res = await fetchFn(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
                 if (!res.ok) return { success: false, content: `[Gemini Error ${res.status}] ${await res.text()}`, _status: res.status };
-                return { success: true, content: CPM.createSSEStream(res, (line) => CPM.parseGeminiSSELine(line, config), abortSignal) };
+
+                if (streamingEnabled) {
+                    // Streaming: return SSE ReadableStream
+                    return { success: true, content: CPM.createSSEStream(res, (line) => CPM.parseGeminiSSELine(line, config), abortSignal) };
+                } else {
+                    // Non-streaming: parse JSON response directly
+                    const data = await res.json();
+                    if (typeof CPM.parseGeminiNonStreamingResponse === 'function') {
+                        return CPM.parseGeminiNonStreamingResponse(data, config);
+                    }
+                    // Fallback: extract text directly
+                    const text = data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
+                    return { success: !!text, content: text || '[Gemini] Empty response' };
+                }
             };
 
             // Use key rotation if available, otherwise fall back to single key

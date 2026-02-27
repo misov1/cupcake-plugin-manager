@@ -1,6 +1,6 @@
 //@name CPM Component - Copilot Token Manager
 //@display-name Cupcake Copilot Manager
-//@version 1.5.4
+//@version 1.6.0
 //@author Cupcake
 //@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-copilot-manager.js
 
@@ -419,11 +419,8 @@
             if (userData && typeof userData === 'object') {
                 // Detect if we got token endpoint response (cached) instead of /user response
                 if (userData.token && userData.tracking_id && !userData.quota_snapshots && !userData.limited_user_quotas) {
-                    console.warn(LOG_TAG, 'WARNING: /user returned token endpoint data (proxy cache issue). quota data unreliable.');
+                    console.warn(LOG_TAG, '/user returned token endpoint data (proxy cache). Quota data may be missing.');
                 }
-                console.log(LOG_TAG, 'quota_snapshots =', JSON.stringify(userData.quota_snapshots ?? null));
-                console.log(LOG_TAG, 'limited_user_quotas =', JSON.stringify(userData.limited_user_quotas ?? null));
-                console.log(LOG_TAG, 'limited_user_reset_date =', userData.limited_user_reset_date ?? null);
 
                 quotaInfo.copilot_user = userData;
                 if (userData.quota_snapshots) {
@@ -433,9 +430,9 @@
                     quotaInfo.limited_user_quotas = userData.limited_user_quotas;
                     quotaInfo.limited_user_reset_date = userData.limited_user_reset_date;
                 }
-                console.log(LOG_TAG, 'Copilot user data retrieved successfully.');
+                console.log(LOG_TAG, 'Copilot user data retrieved.', userData.quota_snapshots ? '(quota_snapshots)' : userData.limited_user_quotas ? '(limited_user_quotas)' : '(no quota data)');
             } else {
-                console.warn(LOG_TAG, 'Failed to retrieve copilot_internal/user data via any strategy.');
+                console.warn(LOG_TAG, 'Failed to retrieve copilot_internal/user data.');
             }
         } catch (e) { console.warn(LOG_TAG, 'Copilot user quota check failed:', e); }
 
@@ -527,7 +524,7 @@
                             <div class="flex items-start"><span class="bg-blue-600 text-white w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold mr-3 shrink-0">2</span>
                                 <div class="flex-1"><span class="text-gray-200">아래 코드를 입력하세요:</span>
                                     <div class="flex items-center justify-between bg-gray-700 p-3 rounded-md mt-2">
-                                        <span class="font-mono text-2xl tracking-widest text-white font-bold" id="${DIALOG_ID}-code">${deviceCode.user_code}</span>
+                                        <span class="font-mono text-2xl tracking-widest text-white font-bold" id="${DIALOG_ID}-code">${escapeHtml(deviceCode.user_code)}</span>
                                         <button onclick="navigator.clipboard.writeText(document.getElementById('${DIALOG_ID}-code').textContent).then(()=>{})" class="bg-gray-600 hover:bg-gray-500 text-white text-xs px-3 py-1 rounded">복사</button>
                                     </div></div></div>
                             <div class="flex items-start"><span class="bg-blue-600 text-white w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold mr-3 shrink-0">3</span>
@@ -662,7 +659,7 @@
                                 <span><strong>남은 요청:</strong></span>
                                 <span style="color:${color}; font-size:1.4em; font-weight:bold;">${remaining} <span style="font-size:0.6em; color:#9ca3af;">/ ${entitlement}</span></span>
                             </div>
-                            <div class="bg-gray-700 rounded-full h-3 overflow-hidden mb-2"><div style="background:${color}; width:${pctRemaining}%; height:100%; transition:width 0.3s; border-radius:9999px;"></div></div>
+                            <div class="bg-gray-700 rounded-full h-3 overflow-hidden mb-2"><div style="background:${color}; width:${Math.min(pctRemaining, 100)}%; height:100%; transition:width 0.3s; border-radius:9999px;"></div></div>
                             <div class="flex justify-between text-xs text-gray-400">
                                 <span>사용: ${used}회</span>
                                 <span>${pctRemaining.toFixed(1)}% 남음</span>
@@ -693,7 +690,7 @@
                                     <span class="capitalize text-xs text-gray-300">${escapeHtml(label)}</span>
                                     <span class="text-xs" style="color:${clr};">${rem} / ${ent}</span>
                                 </div>
-                                <div class="bg-gray-700 rounded-full h-1.5 overflow-hidden"><div style="background:${clr}; width:${pct}%; height:100%; border-radius:9999px;"></div></div>
+                                <div class="bg-gray-700 rounded-full h-1.5 overflow-hidden"><div style="background:${clr}; width:${Math.min(pct, 100)}%; height:100%; border-radius:9999px;"></div></div>
                             </div>`;
                         }
                     }
@@ -714,7 +711,7 @@
                         const limit = item.limit ?? item.entitlement ?? item.total ?? item.monthly ?? null;
                         const used = item.used ?? item.consumed ?? (limit != null && item.remaining != null ? limit - item.remaining : null);
                         const remaining = item.remaining ?? (limit != null && used != null ? limit - used : null);
-                        const unlimited = item.unlimited ?? (limit === null || limit === undefined || limit === 0);
+                        const unlimited = item.unlimited === true;
 
                         if (unlimited && !limit) {
                             luqHtml += `<div class="flex items-center justify-between py-2 border-b border-gray-700 last:border-0">
@@ -731,7 +728,7 @@
                                     <span class="capitalize text-xs text-gray-300">${escapeHtml(label)}</span>
                                     <span class="text-xs" style="color:${clr};">${remaining != null ? remaining : (limit - usedVal)} / ${limit}</span>
                                 </div>
-                                <div class="bg-gray-700 rounded-full h-2 overflow-hidden"><div style="background:${clr}; width:${pctRemain}%; height:100%; border-radius:9999px;"></div></div>
+                                <div class="bg-gray-700 rounded-full h-2 overflow-hidden"><div style="background:${clr}; width:${Math.min(Math.max(pctRemain, 0), 100)}%; height:100%; border-radius:9999px;"></div></div>
                             </div>`;
                         } else {
                             // Unknown structure — show raw

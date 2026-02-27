@@ -1,5 +1,5 @@
 //@name CPM Provider - DeepSeek
-//@version 1.4.1
+//@version 1.4.2
 //@description DeepSeek provider for Cupcake PM (Streaming, Key Rotation)
 //@icon 🟣
 //@update-url https://raw.githubusercontent.com/ruyari-cupcake/cupcake-plugin-manager/main/cpm-provider-deepseek.js
@@ -49,9 +49,11 @@
 
             const url = config.url || 'https://api.deepseek.com/v1/chat/completions';
 
+            const streamingEnabled = await CPM.safeGetBoolArg('cpm_streaming_enabled', false);
+
             // Key Rotation: wrap fetch in withKeyRotation for automatic retry on 429/529
             const doFetch = async (apiKey) => {
-                const body = { model: config.model || 'deepseek-chat', messages: CPM.formatToOpenAI(messages), temperature: temp, max_tokens: maxTokens, stream: true };
+                const body = { model: config.model || 'deepseek-chat', messages: CPM.formatToOpenAI(messages), temperature: temp, max_tokens: maxTokens, stream: streamingEnabled };
                 if (args.top_p !== undefined && args.top_p !== null) body.top_p = args.top_p;
                 if (args.frequency_penalty !== undefined && args.frequency_penalty !== null) body.frequency_penalty = args.frequency_penalty;
                 if (args.presence_penalty !== undefined && args.presence_penalty !== null) body.presence_penalty = args.presence_penalty;
@@ -63,7 +65,13 @@
                     body: JSON.stringify(body)
                 });
                 if (!res.ok) return { success: false, content: `[DeepSeek Error ${res.status}] ${await res.text()}`, _status: res.status };
-                return { success: true, content: CPM.createSSEStream(res, CPM.parseOpenAISSELine, abortSignal) };
+
+                if (streamingEnabled) {
+                    return { success: true, content: CPM.createSSEStream(res, CPM.parseOpenAISSELine, abortSignal) };
+                } else {
+                    const data = await res.json();
+                    return { success: true, content: data.choices?.[0]?.message?.content || '' };
+                }
             };
 
             // Use key rotation if available, otherwise fall back to single key

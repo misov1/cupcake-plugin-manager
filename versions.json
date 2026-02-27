@@ -1,38 +1,38 @@
 {
     "CPM Provider - Vertex AI": {
-        "version": "1.5.8",
+        "version": "1.6.1",
         "file": "cpm-provider-vertex.js",
-        "changes": "기본 리전 us-central1 → global 변경"
+        "changes": "스트리밍 토글, typeof 가드, thinkingLevel 케이싱 통일"
     },
     "CPM Provider - Gemini Studio": {
-        "version": "1.5.5",
+        "version": "1.6.1",
         "file": "cpm-provider-gemini.js",
-        "changes": ""
+        "changes": "스트리밍 토글, typeof 가드"
     },
     "CPM Provider - Anthropic": {
-        "version": "1.6.2",
+        "version": "1.6.3",
         "file": "cpm-provider-anthropic.js",
-        "changes": ""
+        "changes": "스트리밍 토글"
     },
     "CPM Provider - OpenAI": {
-        "version": "1.5.2",
+        "version": "1.5.3",
         "file": "cpm-provider-openai.js",
-        "changes": ""
+        "changes": "스트리밍 토글"
     },
     "CPM Provider - DeepSeek": {
-        "version": "1.4.1",
+        "version": "1.4.2",
         "file": "cpm-provider-deepseek.js",
-        "changes": ""
+        "changes": "스트리밍 토글"
     },
     "CPM Provider - OpenRouter": {
-        "version": "1.3.1",
+        "version": "1.3.2",
         "file": "cpm-provider-openrouter.js",
-        "changes": ""
+        "changes": "스트리밍 토글"
     },
     "CPM Provider - AWS Bedrock": {
-        "version": "1.4.2",
+        "version": "1.4.3",
         "file": "cpm-provider-aws.js",
-        "changes": ""
+        "changes": "스트리밍 토글"
     },
     "CPM Component - Chat Input Resizer": {
         "version": "0.2.0",
@@ -40,9 +40,9 @@
         "changes": ""
     },
     "CPM Component - Copilot Token Manager": {
-        "version": "1.5.4",
+        "version": "1.6.0",
         "file": "cpm-copilot-manager.js",
-        "changes": "copilotFetch: nativeFetch를 1순위로 변경 (CORS 미지원 Copilot API 대응, Docker/로컬 환경 호환)"
+        "changes": "할당량 표시 수정 (nativeFetch 캐시 우회, limited_user_quotas 지원)"
     },
     "CPM Component - Translation Cache Manager": {
         "version": "1.2.2",

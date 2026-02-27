@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.15.3
+//@version 1.17.0
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.15.3';
+const CPM_VERSION = '1.16.0';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -1171,6 +1171,14 @@ window.CupcakePM = {
     parseGeminiSSELine,
     collectStream,
     buildGeminiThinkingConfig,
+    getGeminiSafetySettings,
+    validateGeminiParams,
+    isExperimentalGeminiModel,
+    cleanExperimentalModelParams,
+    parseGeminiNonStreamingResponse,
+    parseClaudeNonStreamingResponse,
+    // ThoughtSignatureCache is a const declared later — use getter to avoid TDZ
+    get ThoughtSignatureCache() { return ThoughtSignatureCache; },
     /** Check if the V3 iframe bridge can transfer ReadableStream. */
     isStreamingAvailable: async () => {
         const enabled = await safeGetBoolArg('cpm_streaming_enabled', false);
@@ -1264,6 +1272,68 @@ async function inferSlot(activeModelDef) {
 }
 
 /**
+ * Get Gemini safety settings with all categories set to OFF.
+ * Aligned with LBI pre36 — prevents default safety filtering.
+ */
+function getGeminiSafetySettings() {
+    return [
+        'HATE_SPEECH',
+        'DANGEROUS_CONTENT',
+        'HARASSMENT',
+        'SEXUALLY_EXPLICIT',
+        'CIVIC_INTEGRITY',
+    ].map(c => ({
+        category: `HARM_CATEGORY_${c}`,
+        threshold: 'OFF',
+    }));
+}
+
+/**
+ * Validate and clamp Gemini API parameters to valid ranges.
+ * Aligned with LBI pre36 GoogleAIProvider.validateApiParameters().
+ * Mutates the generationConfig object in place.
+ */
+function validateGeminiParams(generationConfig) {
+    if (!generationConfig || typeof generationConfig !== 'object') return;
+    const rules = [
+        ['temperature', 0, 2, 1, false],    // [key, min, max, fallback, exclusiveMax]
+        ['topP', 0, 1, undefined, false],
+        ['topK', 1, 40, undefined, false],   // also must be integer
+        ['frequencyPenalty', -2, 2, undefined, true],
+        ['presencePenalty', -2, 2, undefined, true],
+    ];
+    for (const [key, min, max, fallback, exclusiveMax] of rules) {
+        if (generationConfig[key] == null) continue;
+        const val = generationConfig[key];
+        const exceedsMax = exclusiveMax ? val >= max : val > max;
+        const isBad = val < min || exceedsMax || (key === 'topK' && !Number.isInteger(val));
+        if (isBad) {
+            if (fallback !== undefined) generationConfig[key] = fallback;
+            else delete generationConfig[key];
+        }
+    }
+}
+
+/**
+ * Check if a model is an experimental Gemini model.
+ * Experimental models don't support frequencyPenalty/presencePenalty.
+ */
+function isExperimentalGeminiModel(modelId) {
+    return modelId && (modelId.includes('exp') || modelId.includes('experimental'));
+}
+
+/**
+ * Strip frequencyPenalty/presencePenalty from generationConfig if model is experimental.
+ * Aligned with LBI pre36 behavior.
+ */
+function cleanExperimentalModelParams(generationConfig, modelId) {
+    if (isExperimentalGeminiModel(modelId)) {
+        delete generationConfig.frequencyPenalty;
+        delete generationConfig.presencePenalty;
+    }
+}
+
+/**
  * Build Gemini thinkingConfig based on model version.
  * - Gemini 3+: uses thinkMode (level string: MINIMAL/LOW/MEDIUM/HIGH)
  * - Gemini 2.5: uses thinkingBudget (numeric token count)
@@ -1271,6 +1341,7 @@ async function inferSlot(activeModelDef) {
  * @param {string} model - Model ID (e.g. 'gemini-3-pro-preview', 'gemini-2.5-flash')
  * @param {string} level - Thinking level from dropdown (off/none/MINIMAL/LOW/MEDIUM/HIGH)
  * @param {number|string} [budget] - Explicit token budget (for 2.5 models)
+ * @param {boolean} [isVertexAI] - Whether this is for Vertex AI (affects field casing)
  * @returns {object|null} thinkingConfig object or null if disabled
  */
 function buildGeminiThinkingConfig(model, level, budget, isVertexAI) {
@@ -1291,14 +1362,15 @@ function buildGeminiThinkingConfig(model, level, budget, isVertexAI) {
     }
 
     // Gemini 2.5 and others: thinking budget (thinkingBudget)
+    // Must include includeThoughts: true for thought content to be returned
     if (budgetNum > 0) {
-        return { thinkingBudget: budgetNum };
+        return { includeThoughts: true, thinkingBudget: budgetNum };
     }
     // Fallback: if level is set but no explicit budget, map level to budget
     if (level && level !== 'off' && level !== 'none') {
         const budgets = { 'MINIMAL': 1024, 'LOW': 4096, 'MEDIUM': 10240, 'HIGH': 24576 };
         const mapped = budgets[level] || parseInt(level) || 10240;
-        return { thinkingBudget: mapped };
+        return { includeThoughts: true, thinkingBudget: mapped };
     }
     return null;
 }
@@ -1403,19 +1475,134 @@ function formatToAnthropic(messages, config = {}) {
     return { messages: formattedMsgs, system: systemPrompt };
 }
 
+/**
+ * Strip embedded thought display content from historical model messages.
+ * During streaming, thought/reasoning content is injected into the stream text
+ * for display (e.g. <Thoughts>...</Thoughts> or > [Thought Process] blocks).
+ * When that text is saved to chat history and sent back in subsequent requests,
+ * it pollutes the API context and wastes tokens. This strips those markers.
+ */
+function stripThoughtDisplayContent(text) {
+    if (!text) return text;
+    let cleaned = text;
+    // New format (v1.16.0+): <Thoughts>...</Thoughts>
+    cleaned = cleaned.replace(/<Thoughts>[\s\S]*?<\/Thoughts>\s*/g, '');
+    // Old format (pre-v1.16.0): > [Thought Process] blockquote sections
+    // Each block: "> [Thought Process]\n> title\n\n\\n\\n\n\nBody text\n\n\n\n"
+    if (cleaned.includes('> [Thought Process]')) {
+        const lastMarkerIdx = cleaned.lastIndexOf('> [Thought Process]');
+        const afterLastMarker = cleaned.substring(lastMarkerIdx);
+        // Find where actual content starts after the last thought block
+        // Actual content follows after 3+ consecutive newlines then non-whitespace/non-blockquote text
+        const contentMatch = afterLastMarker.match(/\n{3,}\s*(?=[^\s>\\])/);
+        if (contentMatch) {
+            cleaned = afterLastMarker.substring(contentMatch.index).trim();
+        } else {
+            // All content is thought text — strip everything
+            cleaned = '';
+        }
+    }
+    // Clean up literal \\n\\n artifacts from old format
+    cleaned = cleaned.replace(/\\n\\n/g, '');
+    return cleaned.replace(/\n{3,}/g, '\n\n').trim();
+}
+
 function formatToGemini(messagesRaw, config = {}) {
     const messages = sanitizeMessages(messagesRaw);
     const systemInstruction = [];
     const contents = [];
+
+    // Collect system messages: only leading system messages (before any user/assistant)
+    // Aligned with LBI pre36 behavior — system messages scattered in conversation body
+    // are merged into regular user content, not the dedicated systemInstruction field.
+    let systemPhase = true; // still collecting leading system messages
+
     for (const m of messages) {
-        if (m.role === 'system') systemInstruction.push(typeof m.content === 'string' ? m.content : JSON.stringify(m.content));
-        else {
-            const role = m.role === 'assistant' ? 'model' : 'user';
-            const text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
-            if (contents.length > 0 && contents[contents.length - 1].role === role) contents[contents.length - 1].parts.push({ text });
-            else contents.push({ role, parts: [{ text }] });
+        if (m.role === 'system' && systemPhase) {
+            systemInstruction.push(typeof m.content === 'string' ? m.content : JSON.stringify(m.content));
+            continue;
+        }
+        if (m.role !== 'system') systemPhase = false;
+
+        const role = (m.role === 'assistant' || m.role === 'model') ? 'model' : 'user';
+        const text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+        let trimmed = text.trim();
+
+        // Strip thought display content from historical model messages
+        // to prevent thought text (shown during streaming) from polluting subsequent API requests
+        if (role === 'model') {
+            trimmed = stripThoughtDisplayContent(trimmed);
+        }
+
+        // Handle system messages found after the leading block — merge into user content
+        if (m.role === 'system') {
+            const sysText = `[System]\n${trimmed}\n[/System]`;
+            if (contents.length > 0 && contents[contents.length - 1].role === 'user') {
+                contents[contents.length - 1].parts.push({ text: sysText });
+            } else {
+                contents.push({ role: 'user', parts: [{ text: sysText }] });
+            }
+            continue;
+        }
+
+        // Skip empty messages (LBI pre36 skips trimedContent === '')
+        if (trimmed === '' && !(m.multimodals && m.multimodals.length > 0)) continue;
+
+        // Multimodal handling (images/audio/video → inlineData)
+        // Aligned with LBI pre36 multimodal → inlineData conversion
+        if (m.multimodals && Array.isArray(m.multimodals) && m.multimodals.length > 0) {
+            const lastMessage = contents.length > 0 ? contents[contents.length - 1] : null;
+
+            // If same role as last message (consecutive), append to it
+            if (lastMessage && lastMessage.role === role) {
+                if (trimmed) {
+                    // If last part is inlineData, push new text part; otherwise append
+                    if (lastMessage.parts[lastMessage.parts.length - 1]?.inlineData) {
+                        lastMessage.parts.push({ text: trimmed });
+                    } else {
+                        lastMessage.parts[lastMessage.parts.length - 1].text += '\n\n' + trimmed;
+                    }
+                }
+                for (const modal of m.multimodals) {
+                    if (modal.type === 'image' || modal.type === 'audio' || modal.type === 'video') {
+                        const base64 = modal.base64 || '';
+                        const mimeType = base64.split(';')[0]?.split(':')[1] || 'application/octet-stream';
+                        const data = base64.split(',')[1] || '';
+                        lastMessage.parts.push({ inlineData: { mimeType, data } });
+                    }
+                }
+            } else {
+                // New message with multimodal content
+                const newParts = [];
+                if (trimmed) newParts.push({ text: trimmed });
+                for (const modal of m.multimodals) {
+                    if (modal.type === 'image' || modal.type === 'audio' || modal.type === 'video') {
+                        const base64 = modal.base64 || '';
+                        const mimeType = base64.split(';')[0]?.split(':')[1] || 'application/octet-stream';
+                        const data = base64.split(',')[1] || '';
+                        newParts.push({ inlineData: { mimeType, data } });
+                    }
+                }
+                if (newParts.length > 0) contents.push({ role, parts: newParts });
+            }
+            continue;
+        }
+
+        // Text-only message
+        const part = { text: trimmed || text };
+        // Inject thought_signature if enabled and available (for context caching)
+        if (config.useThoughtSignature && role === 'model') {
+            const cachedSig = ThoughtSignatureCache.get(trimmed || text);
+            if (cachedSig) part.thought_signature = cachedSig;
+        }
+
+        if (contents.length > 0 && contents[contents.length - 1].role === role) {
+            contents[contents.length - 1].parts.push(part);
+        } else {
+            contents.push({ role, parts: [part] });
         }
     }
+
     if (contents.length > 0 && contents[0].role === 'model') contents.unshift({ role: 'user', parts: [{ text: '(Continue)' }] });
 
     if (!config.preserveSystem && systemInstruction.length > 0) {
@@ -1443,7 +1630,7 @@ function formatToGemini(messagesRaw, config = {}) {
  * @param {AbortSignal} [abortSignal] - optional abort signal
  * @returns {ReadableStream<string>}
  */
-function createSSEStream(response, lineParser, abortSignal) {
+function createSSEStream(response, lineParser, abortSignal, onComplete) {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
@@ -1454,7 +1641,7 @@ function createSSEStream(response, lineParser, abortSignal) {
                 while (true) {
                     if (abortSignal && abortSignal.aborted) {
                         reader.cancel();
-                        if (typeof onComplete === 'function') try { onComplete(); } catch { }
+                        if (typeof onComplete === 'function') try { const _f = onComplete(); if (_f) controller.enqueue(_f); } catch { }
                         controller.close();
                         return;
                     }
@@ -1465,7 +1652,7 @@ function createSSEStream(response, lineParser, abortSignal) {
                             const delta = lineParser(buffer.trim());
                             if (delta) controller.enqueue(delta);
                         }
-                        if (typeof onComplete === 'function') try { onComplete(); } catch { }
+                        if (typeof onComplete === 'function') try { const _f = onComplete(); if (_f) controller.enqueue(_f); } catch { }
                         controller.close();
                         return;
                     }
@@ -1481,10 +1668,10 @@ function createSSEStream(response, lineParser, abortSignal) {
                 }
             } catch (e) {
                 if (e.name !== 'AbortError') {
-                    if (typeof onComplete === 'function') try { onComplete(); } catch { }
+                    if (typeof onComplete === 'function') try { const _f = onComplete(); if (_f) controller.enqueue(_f); } catch { }
                     controller.error(e);
                 } else {
-                    if (typeof onComplete === 'function') try { onComplete(); } catch { }
+                    if (typeof onComplete === 'function') try { const _f = onComplete(); if (_f) controller.enqueue(_f); } catch { }
                     controller.close();
                 }
             }
@@ -1624,23 +1811,200 @@ function createAnthropicSSEStream(response, abortSignal, config = {}) {
  * Gemini SSE parser: extracts text parts from streamed JSON chunks.
  * Gemini streamGenerateContent with alt=sse returns "data: {...}" lines.
  */
+/**
+ * Simple in-memory cache for Gemini thought_signature values.
+ * Maps response text (truncated) → signature for injection into subsequent requests.
+ */
+const ThoughtSignatureCache = {
+    _cache: new Map(),
+    _maxSize: 50,
+    save(responseText, signature) {
+        if (!responseText || !signature) return;
+        // Use first 200 chars as key (sufficient for uniqueness)
+        const key = String(responseText).substring(0, 200);
+        this._cache.set(key, signature);
+        // Evict oldest entries if cache grows too large
+        if (this._cache.size > this._maxSize) {
+            const firstKey = this._cache.keys().next().value;
+            this._cache.delete(firstKey);
+        }
+    },
+    get(responseText) {
+        if (!responseText) return null;
+        const key = String(responseText).substring(0, 200);
+        return this._cache.get(key) || null;
+    },
+    clear() { this._cache.clear(); }
+};
+
+/**
+ * onComplete callback for streaming Gemini responses — saves extracted thought_signature.
+ * Called after stream ends. The config._lastSignature is set during parseGeminiSSELine.
+ */
+function saveThoughtSignatureFromStream(config) {
+    let finalChunk = '';
+    // Close unclosed thought block (edge case: stream ends during thought phase)
+    if (config._inThoughtBlock) {
+        config._inThoughtBlock = false;
+        finalChunk += '\n</Thoughts>\n\n';
+    }
+    // The signature was collected during streaming via config._lastSignature
+    if (config._lastSignature) {
+        console.log('[CupcakePM] Thought signature extracted from stream (cached for next request)');
+    }
+    return finalChunk || undefined;
+}
+
 function parseGeminiSSELine(line, config = {}) {
     if (!line.startsWith('data:')) return null;
     const jsonStr = line.slice(5).trim();
     try {
         const obj = JSON.parse(jsonStr);
+
+        // Check for block reasons / finishReason (safety filtering)
+        // Aligned with LBI pre36 GoogleAIProvider.parseContent()
+        const promptBlockReason = obj?.promptFeedback?.blockReason;
+        const finishReason = obj?.candidates?.[0]?.finishReason;
+        const effectiveBlockReason = promptBlockReason ?? finishReason;
+        const BLOCK_REASONS = ['SAFETY', 'RECITATION', 'OTHER', 'BLOCKLIST', 'PROHIBITED_CONTENT', 'SPII'];
+        if (effectiveBlockReason && BLOCK_REASONS.includes(effectiveBlockReason)) {
+            // Close unclosed thought block before returning error
+            let blockMsg = '';
+            if (config._inThoughtBlock) { config._inThoughtBlock = false; blockMsg += '\n</Thoughts>\n\n'; }
+            return blockMsg + `\n\n[⚠️ Gemini Safety Block: ${effectiveBlockReason}] ${JSON.stringify(obj.promptFeedback || obj.candidates?.[0]?.safetyRatings || '').substring(0, 300)}`;
+        }
+
         let text = '';
         if (obj.candidates?.[0]?.content?.parts) {
             for (const part of obj.candidates[0].content.parts) {
-                if (part.thought && config.showThoughtsToken) text += `\n> [Thought Process]\n> ${part.thought}\n\n`;
-                // thought_signature / thoughtSignature: internal cache key for context caching.
-                // Must NOT be included in output text — it's opaque data for request-side injection only.
-                // (LBI stores this in chat.lbi_gemini_cache and injects it into subsequent API requests.)
-                if (part.text !== undefined && !part.thought) text += part.text;
+                if (part.thought) {
+                    // thought is a boolean flag — the actual thinking text is in part.text
+                    // Use <Thoughts> wrapping aligned with LBI pre36 format
+                    if (config.showThoughtsToken && part.text) {
+                        if (!config._inThoughtBlock) {
+                            config._inThoughtBlock = true;
+                            text += '<Thoughts>\n\n';
+                        }
+                        text += part.text;
+                    }
+                } else if (part.text !== undefined) {
+                    // Close thought block when transitioning from thought → content
+                    if (config._inThoughtBlock) {
+                        config._inThoughtBlock = false;
+                        text += '\n</Thoughts>\n\n';
+                    }
+                    text += part.text;
+                }
+                // thought_signature / thoughtSignature: extract and cache for subsequent requests
+                if (config.useThoughtSignature && (part.thought_signature || part.thoughtSignature)) {
+                    // Store signature temporarily for onComplete callback
+                    if (!config._lastSignature) config._lastSignature = part.thought_signature || part.thoughtSignature;
+                }
             }
         }
+
+        // Safety net: close thought block on finishReason (stream end)
+        if (config._inThoughtBlock && finishReason) {
+            config._inThoughtBlock = false;
+            text += '\n</Thoughts>\n\n';
+        }
+
         return text || null;
     } catch { return null; }
+}
+
+/**
+ * Parse a non-streaming Gemini generateContent JSON response.
+ * Used when cpm_streaming_enabled is false — sub-plugins call generateContent instead of streamGenerateContent.
+ * Extracts text parts, handles safety blocks, wraps thoughts in <Thoughts>, caches thought_signature.
+ * @param {Object} data - Parsed JSON response from generateContent endpoint
+ * @param {Object} config - { useThoughtSignature, showThoughtsToken }
+ * @returns {{ success: boolean, content: string }}
+ */
+function parseGeminiNonStreamingResponse(data, config = {}) {
+    const blockReason = data?.promptFeedback?.blockReason
+        ?? data?.candidates?.[0]?.finishReason;
+    const BLOCK_REASONS = ['SAFETY', 'RECITATION', 'OTHER', 'BLOCKLIST', 'PROHIBITED_CONTENT', 'SPII'];
+    if (blockReason && BLOCK_REASONS.includes(blockReason)) {
+        return { success: false, content: `[⚠️ Gemini Safety Block: ${blockReason}] ${JSON.stringify(data.promptFeedback || data.candidates?.[0]?.safetyRatings || '').substring(0, 500)}` };
+    }
+
+    let result = '';
+    let extractedSignature = null;
+    let inThought = false;
+
+    if (data.candidates?.[0]?.content?.parts) {
+        for (const part of data.candidates[0].content.parts) {
+            if (part.thought) {
+                // thought is a boolean flag — actual text is in part.text
+                if (config.showThoughtsToken && part.text) {
+                    if (!inThought) { inThought = true; result += '<Thoughts>\n\n'; }
+                    result += part.text;
+                }
+                // Skip thought text from main content when showThoughtsToken is off
+            } else if (part.text !== undefined) {
+                if (inThought) { inThought = false; result += '\n</Thoughts>\n\n'; }
+                result += part.text;
+            }
+            // Extract thought signature (snake_case + camelCase)
+            if (config.useThoughtSignature && (part.thought_signature || part.thoughtSignature)) {
+                extractedSignature = part.thought_signature || part.thoughtSignature;
+            }
+        }
+    }
+
+    // Close unclosed thought block
+    if (inThought) result += '\n</Thoughts>\n\n';
+
+    // Save extracted signature to cache if present
+    if (extractedSignature && result) {
+        ThoughtSignatureCache.save(result, extractedSignature);
+    }
+
+    return { success: true, content: result };
+}
+
+/**
+ * Parse a non-streaming Claude (Anthropic) JSON response.
+ * Used when cpm_streaming_enabled is false — Vertex Claude uses rawPredict instead of streamRawPredict.
+ * Handles thinking blocks with <Thoughts> wrapping.
+ * @param {Object} data - Parsed JSON response from rawPredict endpoint
+ * @param {Object} config - { showThinking }
+ * @returns {{ success: boolean, content: string }}
+ */
+function parseClaudeNonStreamingResponse(data, config = {}) {
+    // Check for API-level error
+    if (data.type === 'error' || data.error) {
+        const errMsg = data.error?.message || data.message || JSON.stringify(data.error || data).substring(0, 500);
+        return { success: false, content: `[Claude Error] ${errMsg}` };
+    }
+
+    let result = '';
+    let inThinking = false;
+
+    if (Array.isArray(data.content)) {
+        for (const block of data.content) {
+            if (block.type === 'thinking') {
+                if (config.showThinking && block.thinking) {
+                    if (!inThinking) { inThinking = true; result += '<Thoughts>\n\n'; }
+                    result += block.thinking;
+                }
+            } else if (block.type === 'redacted_thinking') {
+                if (config.showThinking) {
+                    if (!inThinking) { inThinking = true; result += '<Thoughts>\n\n'; }
+                    result += '\n[REDACTED]\n';
+                }
+            } else if (block.type === 'text') {
+                if (inThinking) { inThinking = false; result += '\n</Thoughts>\n\n'; }
+                result += block.text || '';
+            }
+        }
+    }
+
+    // Close unclosed thinking block
+    if (inThinking) result += '\n</Thoughts>\n\n';
+
+    return { success: true, content: result };
 }
 
 /**
@@ -1856,10 +2220,26 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
         body.contents = formattedMessages;
         if (systemPrompt) body.systemInstruction = { parts: [{ text: systemPrompt }] };
         body.generationConfig = { temperature: temp, maxOutputTokens: maxTokens };
-        const _thinkCfg = buildGeminiThinkingConfig(config.model, config.thinking_level, undefined, false);
+        if (args.top_p !== undefined && args.top_p !== null) body.generationConfig.topP = args.top_p;
+        if (args.top_k !== undefined && args.top_k !== null) body.generationConfig.topK = args.top_k;
+        if (args.frequency_penalty !== undefined && args.frequency_penalty !== null) body.generationConfig.frequencyPenalty = args.frequency_penalty;
+        if (args.presence_penalty !== undefined && args.presence_penalty !== null) body.generationConfig.presencePenalty = args.presence_penalty;
+        // Detect if this is a Vertex AI endpoint (for correct field casing)
+        const _isVertexEndpoint = config.url && (config.url.includes('aiplatform.googleapis.com') || config.url.includes('vertex'));
+        const _thinkCfg = buildGeminiThinkingConfig(config.model, config.thinking_level, undefined, _isVertexEndpoint);
         if (_thinkCfg) body.generationConfig.thinkingConfig = _thinkCfg;
+        // Add safety settings (all categories OFF, aligned with LBI pre36)
+        body.safetySettings = getGeminiSafetySettings();
+        // Validate and clamp parameters
+        validateGeminiParams(body.generationConfig);
+        // Strip unsupported params for experimental models
+        cleanExperimentalModelParams(body.generationConfig, config.model);
         delete body.temperature;
         delete body.max_tokens;
+        delete body.top_p;
+        delete body.top_k;
+        delete body.frequency_penalty;
+        delete body.presence_penalty;
     } else { // OpenAI compatible
         body.messages = formattedMessages;
     }
@@ -1922,11 +2302,13 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
         try {
             const extra = JSON.parse(config.customParams);
             if (typeof extra === 'object' && extra !== null) {
-                // Protect: do NOT allow customParams to overwrite messages/contents arrays
-                // (they were already sanitized above — overwriting would bypass all null filters)
+                // Protect: do NOT allow customParams to overwrite critical fields
+                // messages/contents: already sanitized above — overwriting would bypass null filters
+                // stream: controlled by cpm_streaming_enabled — must not be overridden by user params
                 const safeExtra = { ...extra };
                 delete safeExtra.messages;
                 delete safeExtra.contents;
+                delete safeExtra.stream;
                 Object.assign(body, safeExtra);
             }
         } catch (e) {
@@ -2064,7 +2446,7 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
                 const showThinking = await safeGetBoolArg('cpm_streaming_show_thinking', false);
                 return { success: true, content: createAnthropicSSEStream(res, abortSignal, { showThinking }) };
             } else if (format === 'google') {
-                const _onComplete = config.useThoughtSignature ? () => saveThoughtSignatureFromStream(config) : undefined;
+                const _onComplete = () => saveThoughtSignatureFromStream(config);
                 return { success: true, content: createSSEStream(res, (line) => parseGeminiSSELine(line, config), abortSignal, _onComplete) };
             } else {
                 return { success: true, content: createSSEStream(res, parseOpenAISSELine, abortSignal) };
@@ -2102,33 +2484,18 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
             return { success: false, content: `[Custom API Error ${res.status}] ${errBody}`, _status: res.status };
         }
 
-        _lastCustomApiRequest.response = '(streaming — response body not captured)';
+        _lastCustomApiRequest.response = '(non-streaming — parsing response...)';
         const data = await res.json();
         _lastCustomApiRequest.response = data;
 
         if (format === 'anthropic') {
-            let result = '';
-            if (Array.isArray(data.content)) {
-                for (const block of data.content) if (block.type === 'text') result += block.text;
-            }
-            return { success: true, content: result };
+            // Use unified non-streaming Claude parser (thinking/redacted_thinking support)
+            let showThinking = false;
+            try { showThinking = await safeGetBoolArg('cpm_streaming_show_thinking', false); } catch { }
+            return parseClaudeNonStreamingResponse(data, { showThinking });
         } else if (format === 'google') {
-            let result = '';
-            let extractedSignature = null;
-            if (data.candidates?.[0]?.content?.parts) {
-                for (const part of data.candidates[0].content.parts) {
-                    if (part.text !== undefined && !part.thought) result += part.text;
-                    // Extract thought signature from response parts (snake_case + camelCase)
-                    if (config.useThoughtSignature && (part.thought_signature || part.thoughtSignature)) {
-                        extractedSignature = part.thought_signature || part.thoughtSignature;
-                    }
-                }
-            }
-            // Save extracted signature to cache if present
-            if (extractedSignature && result) {
-                await ThoughtSignatureCache.save(result, extractedSignature);
-            }
-            return { success: true, content: result };
+            // Use unified non-streaming Gemini parser (safety block, <Thoughts>, thought_signature)
+            return parseGeminiNonStreamingResponse(data, config);
         } else { // OpenAI compatible
             return { success: true, content: data.choices?.[0]?.message?.content || '' };
         }
@@ -2194,6 +2561,7 @@ async function fetchByProviderId(modelDef, args, abortSignal) {
                 reasoning: cDef.reasoning || 'none', verbosity: cDef.verbosity || 'none',
                 thinking_level: cDef.thinking || 'none', tok: cDef.tok || 'o200k_base',
                 decoupled: !!cDef.decoupled, thought: !!cDef.thought,
+                showThoughtsToken: !!cDef.thought, useThoughtSignature: !!cDef.thought,
                 customParams: cDef.customParams || '', copilotToken: '',
                 effort: cDef.effort || 'none'
             }, messages, temp, maxTokens, args, abortSignal);
