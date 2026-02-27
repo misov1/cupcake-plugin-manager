@@ -1,10 +1,10 @@
 //@name Cupcake_Provider_Manager
 //@display-name Cupcake Provider Manager
 //@api 3.0
-//@version 1.15.2
+//@version 1.15.3
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.15.2';
+const CPM_VERSION = '1.15.3';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
@@ -284,8 +284,12 @@ async function smartNativeFetch(url, options = {}) {
             const isLocationError = errText.includes('User location is not supported') || errText.includes('FAILED_PRECONDITION');
             // Proxy may corrupt/truncate larger JSON bodies → API returns "not valid JSON".
             // Strategy 3 (direct from host) bypasses proxy entirely, avoiding body corruption.
+            // EXCEPTION: githubcopilot.com does NOT support CORS — Strategy 3 (plainFetchForce)
+            // will always fail with a CORS error. Skip Strategy 3 for Copilot URLs to avoid
+            // wasted requests and confusing log output.
             const isInvalidJsonError = errText.includes('not valid JSON') || errText.includes('invalid_request_body') || errText.includes('Could not parse');
-            if (isNullMessageError || isLocationError || isInvalidJsonError) {
+            const isCopilotUrl = url.includes('githubcopilot.com');
+            if (isNullMessageError || isLocationError || (isInvalidJsonError && !isCopilotUrl)) {
                 const reason = isNullMessageError ? 'null-message corruption' : isLocationError ? 'region/location restriction' : 'invalid JSON (possible proxy body corruption)';
                 console.warn(`[CupcakePM] ⚠️ Proxy 400 (${reason}). Trying direct fetch from host...`);
                 console.warn(`[CupcakePM] ↳ Error: ${errText.substring(0, 300)}`);
@@ -1930,15 +1934,14 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
         }
     }
 
-    // Copilot + Effort: auto-switch to /v1/messages endpoint
+    // Copilot + Anthropic: auto-switch to /v1/messages endpoint
+    // Copilot /chat/completions is OpenAI-compatible only.
+    // Anthropic body format MUST go to /v1/messages regardless of Effort setting.
+    // (LBI pre36 reference: user sets URL to /v1/messages directly for claude format)
     let effectiveUrl = config.url;
-    if (config.url && config.url.includes('githubcopilot.com') && config.effort && config.effort !== 'none') {
-        if (format === 'anthropic') {
-            effectiveUrl = 'https://api.githubcopilot.com/v1/messages';
-            console.log('[Cupcake PM] Copilot + Effort detected → URL auto-switched to /v1/messages');
-        } else {
-            console.warn('[Cupcake PM] Copilot + Effort: effort는 Anthropic 포맷에서만 지원됩니다. format을 "anthropic"으로 변경하세요.');
-        }
+    if (config.url && config.url.includes('githubcopilot.com') && format === 'anthropic') {
+        effectiveUrl = 'https://api.githubcopilot.com/v1/messages';
+        console.log('[Cupcake PM] Copilot + Anthropic format detected → URL auto-switched to /v1/messages');
     }
 
     // --- Wrap core fetch logic to support key rotation ---
@@ -1946,6 +1949,7 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
 
         const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${_apiKey}` };
         // Copilot auto-detection: if URL is githubcopilot.com, auto-fetch API token + attach Copilot headers
+        // Header set aligned with LBI pre36 Utils.applyGithubCopilotHeaders()
         if (effectiveUrl && effectiveUrl.includes('githubcopilot.com')) {
             // Auto-fetch Copilot API token (exchanges stored GitHub OAuth token for short-lived API token)
             let copilotApiToken = config.copilotToken || '';
@@ -1957,15 +1961,36 @@ async function fetchCustom(config, messagesRaw, temp, maxTokens, args = {}, abor
             } else {
                 console.warn('[Cupcake PM] Copilot: No API token available. Request may fail auth. Set token via Copilot Manager (🔑 탭).');
             }
-            // Required Copilot headers (from cpm-copilot-manager & VS Code Copilot extension)
+
+            // --- Persistent Copilot session IDs (generated once per plugin lifecycle) ---
+            if (!window._cpmCopilotMachineId) {
+                window._cpmCopilotMachineId = Array.from({ length: 64 }, () =>
+                    Math.floor(Math.random() * 16).toString(16)
+                ).join('');
+            }
+            if (!window._cpmCopilotSessionId) {
+                window._cpmCopilotSessionId = (crypto.randomUUID ? crypto.randomUUID() : '') + Date.now().toString();
+            }
+
+            // Required Copilot headers (aligned with LBI pre36 & VS Code Copilot extension)
             headers['Copilot-Integration-Id'] = 'vscode-chat';
-            headers['X-Request-Id'] = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString();
-            headers['Editor-Version'] = 'vscode/1.109.2';
             headers['Editor-Plugin-Version'] = 'copilot-chat/0.37.4';
-            // Copilot + Effort: /v1/messages 엔드포인트는 Anthropic 형식이므로 anthropic-version 헤더 추가
-            if (config.effort && config.effort !== 'none') {
+            headers['Editor-Version'] = 'vscode/1.109.2';
+            headers['User-Agent'] = 'GitHubCopilotChat/0.37.4';
+            headers['Vscode-Machineid'] = window._cpmCopilotMachineId;
+            headers['Vscode-Sessionid'] = window._cpmCopilotSessionId;
+            headers['X-Github-Api-Version'] = '2025-10-01';
+            headers['X-Initiator'] = 'user';
+            headers['X-Interaction-Id'] = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString();
+            headers['X-Interaction-Type'] = 'conversation-panel';
+            headers['X-Request-Id'] = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString();
+            headers['X-Vscode-User-Agent-Library-Version'] = 'electron-fetch';
+
+            // Anthropic format: add anthropic-version header for /v1/messages endpoint
+            if (format === 'anthropic') {
                 headers['anthropic-version'] = '2023-06-01';
             }
+
             // Copilot-Vision-Request header: detect vision content in messages
             // OpenAI format uses 'image_url', Anthropic format uses 'image'
             const hasVisionContent = body.messages && body.messages.some(m =>
