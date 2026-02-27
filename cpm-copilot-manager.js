@@ -353,55 +353,89 @@
         }
 
         // 2. Copilot usage / quota via copilot_internal/user
-        //    Old API: returns quota_snapshots { premium_interactions, chat, completions }
-        //    New API: returns limited_user_quotas + limited_user_reset_date
-        //    Reference: copilotstats.com uses this same endpoint with OAuth token + simple headers
+        //    Supports: quota_snapshots (old) / limited_user_quotas (new)
+        //    Reference: copilotstats.com uses this same endpoint with OAuth token
+        //    IMPORTANT: Must NOT use nativeFetch here — the RisuAI proxy caches responses
+        //    and returns the /v2/token response for /user as well. Use risuFetch directly.
         try {
-            console.log(LOG_TAG, 'Fetching Copilot quota via /copilot_internal/user...');
-            const userRes = await copilotFetch('https://api.github.com/copilot_internal/user', {
-                method: 'GET',
-                headers: {
-                    'Accept': 'application/json',
-                    'Authorization': `Bearer ${token}`,
-                    'Content-Type': 'application/json',
-                    'User-Agent': USER_AGENT,
-                },
-            });
-            if (userRes.ok) {
-                let userData;
-                try {
-                    userData = await userRes.json();
-                } catch (jsonErr) {
-                    console.warn(LOG_TAG, 'userRes.json() failed, trying .data:', jsonErr.message);
-                    userData = userRes.data;
-                    if (typeof userData === 'string') {
-                        try { userData = JSON.parse(userData); } catch { /* keep as string */ }
-                    }
-                }
-                console.log(LOG_TAG, 'userData keys:', userData && typeof userData === 'object' ? Object.keys(userData).join(', ') : 'N/A');
-                // Dump quota-related fields regardless of truthiness
-                console.log(LOG_TAG, 'limited_user_quotas =', JSON.stringify(userData.limited_user_quotas));
-                console.log(LOG_TAG, 'limited_user_reset_date =', userData.limited_user_reset_date);
-                console.log(LOG_TAG, 'quota_snapshots =', JSON.stringify(userData.quota_snapshots));
-                console.log(LOG_TAG, 'individual =', JSON.stringify(userData.individual));
-                console.log(LOG_TAG, 'sku =', userData.sku);
-                if (userData && typeof userData === 'object') {
-                    quotaInfo.copilot_user = userData;
+            console.log(LOG_TAG, 'Fetching Copilot quota via /copilot_internal/user (direct, no nativeFetch)...');
+            const Risu = window.Risuai || window.risuai;
+            const quotaUrl = 'https://api.github.com/copilot_internal/user';
+            const quotaHeaders = {
+                'Accept': 'application/json',
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json',
+            };
+            let userData = null;
 
-                    // (A) New format: limited_user_quotas (array/object) + limited_user_reset_date
-                    if (userData.limited_user_quotas) {
-                        quotaInfo.limited_user_quotas = userData.limited_user_quotas;
-                        quotaInfo.limited_user_reset_date = userData.limited_user_reset_date;
+            // Strategy A: Direct CORS fetch (api.github.com supports CORS)
+            try {
+                console.log(LOG_TAG, 'Trying risuFetch [direct/CORS] for /user...');
+                const result = await Risu.risuFetch(quotaUrl, {
+                    method: 'GET',
+                    headers: quotaHeaders,
+                    rawResponse: false,
+                    plainFetchForce: true,
+                });
+                if (result && result.ok && result.data && typeof result.data === 'object') {
+                    userData = result.data;
+                    console.log(LOG_TAG, 'risuFetch [direct] succeeded, keys:', Object.keys(userData).join(', '));
+                } else if (result && result.data && typeof result.data === 'string') {
+                    try { userData = JSON.parse(result.data); } catch { /* ignore */ }
+                    if (userData) console.log(LOG_TAG, 'risuFetch [direct] parsed string, keys:', Object.keys(userData).join(', '));
+                }
+                if (!userData) {
+                    console.log(LOG_TAG, 'risuFetch [direct] did not return usable data, status:', result?.status);
+                }
+            } catch (e) {
+                console.log(LOG_TAG, 'risuFetch [direct] exception:', e.message);
+            }
+
+            // Strategy B: Proxy fetch (for Tauri/desktop where CORS may not work)
+            if (!userData) {
+                try {
+                    console.log(LOG_TAG, 'Trying risuFetch [proxy] for /user...');
+                    const result = await Risu.risuFetch(quotaUrl, {
+                        method: 'GET',
+                        headers: quotaHeaders,
+                        rawResponse: false,
+                        plainFetchDeforce: true,
+                    });
+                    if (result && result.ok && result.data && typeof result.data === 'object') {
+                        userData = result.data;
+                        console.log(LOG_TAG, 'risuFetch [proxy] succeeded, keys:', Object.keys(userData).join(', '));
+                    } else if (result && result.data && typeof result.data === 'string') {
+                        try { userData = JSON.parse(result.data); } catch { /* ignore */ }
+                        if (userData) console.log(LOG_TAG, 'risuFetch [proxy] parsed string, keys:', Object.keys(userData).join(', '));
                     }
-                    // (B) Old format: quota_snapshots
-                    if (userData.quota_snapshots) {
-                        quotaInfo.quota_snapshots = userData.quota_snapshots;
+                    if (!userData) {
+                        console.log(LOG_TAG, 'risuFetch [proxy] did not return usable data, status:', result?.status);
                     }
+                } catch (e) {
+                    console.log(LOG_TAG, 'risuFetch [proxy] exception:', e.message);
+                }
+            }
+
+            if (userData && typeof userData === 'object') {
+                // Detect if we got token endpoint response (cached) instead of /user response
+                if (userData.token && userData.tracking_id && !userData.quota_snapshots && !userData.limited_user_quotas) {
+                    console.warn(LOG_TAG, 'WARNING: /user returned token endpoint data (proxy cache issue). quota data unreliable.');
+                }
+                console.log(LOG_TAG, 'quota_snapshots =', JSON.stringify(userData.quota_snapshots ?? null));
+                console.log(LOG_TAG, 'limited_user_quotas =', JSON.stringify(userData.limited_user_quotas ?? null));
+                console.log(LOG_TAG, 'limited_user_reset_date =', userData.limited_user_reset_date ?? null);
+
+                quotaInfo.copilot_user = userData;
+                if (userData.quota_snapshots) {
+                    quotaInfo.quota_snapshots = userData.quota_snapshots;
+                }
+                if (userData.limited_user_quotas) {
+                    quotaInfo.limited_user_quotas = userData.limited_user_quotas;
+                    quotaInfo.limited_user_reset_date = userData.limited_user_reset_date;
                 }
                 console.log(LOG_TAG, 'Copilot user data retrieved successfully.');
             } else {
-                const errText = await userRes.text().catch(() => '');
-                console.warn(LOG_TAG, `copilot_internal/user returned ${userRes.status}: ${errText.substring(0, 200)}`);
+                console.warn(LOG_TAG, 'Failed to retrieve copilot_internal/user data via any strategy.');
             }
         } catch (e) { console.warn(LOG_TAG, 'Copilot user quota check failed:', e); }
 
