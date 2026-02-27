@@ -4,7 +4,7 @@
 //@version 1.17.0
 //@update-url https://cupcake-plugin-manager.vercel.app/provider-manager.js
 
-const CPM_VERSION = '1.16.0';
+const CPM_VERSION = '1.17.0';
 
 // ==========================================
 // 1. ARGUMENT SCHEMAS (Saved Natively by RisuAI)
