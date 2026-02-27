@@ -379,13 +379,17 @@
                     }
                 }
                 console.log(LOG_TAG, 'userData keys:', userData && typeof userData === 'object' ? Object.keys(userData).join(', ') : 'N/A');
+                // Dump quota-related fields regardless of truthiness
+                console.log(LOG_TAG, 'limited_user_quotas =', JSON.stringify(userData.limited_user_quotas));
+                console.log(LOG_TAG, 'limited_user_reset_date =', userData.limited_user_reset_date);
+                console.log(LOG_TAG, 'quota_snapshots =', JSON.stringify(userData.quota_snapshots));
+                console.log(LOG_TAG, 'individual =', JSON.stringify(userData.individual));
+                console.log(LOG_TAG, 'sku =', userData.sku);
                 if (userData && typeof userData === 'object') {
                     quotaInfo.copilot_user = userData;
 
                     // (A) New format: limited_user_quotas (array/object) + limited_user_reset_date
                     if (userData.limited_user_quotas) {
-                        console.log(LOG_TAG, 'limited_user_quotas:', JSON.stringify(userData.limited_user_quotas));
-                        console.log(LOG_TAG, 'limited_user_reset_date:', userData.limited_user_reset_date);
                         quotaInfo.limited_user_quotas = userData.limited_user_quotas;
                         quotaInfo.limited_user_reset_date = userData.limited_user_reset_date;
                     }
