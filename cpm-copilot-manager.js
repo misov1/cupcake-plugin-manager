@@ -353,7 +353,8 @@
         }
 
         // 2. Copilot usage / quota via copilot_internal/user
-        //    This endpoint returns quota_snapshots (premium_interactions, chat, completions)
+        //    Old API: returns quota_snapshots { premium_interactions, chat, completions }
+        //    New API: returns limited_user_quotas + limited_user_reset_date
         //    Reference: copilotstats.com uses this same endpoint with OAuth token + simple headers
         try {
             console.log(LOG_TAG, 'Fetching Copilot quota via /copilot_internal/user...');
@@ -367,7 +368,6 @@
                 },
             });
             if (userRes.ok) {
-                // nativeFetch may wrap response differently — try .json(), fall back to .data
                 let userData;
                 try {
                     userData = await userRes.json();
@@ -378,10 +378,18 @@
                         try { userData = JSON.parse(userData); } catch { /* keep as string */ }
                     }
                 }
-                console.log(LOG_TAG, 'userData type:', typeof userData, '| keys:', userData && typeof userData === 'object' ? Object.keys(userData).join(', ') : String(userData).substring(0, 200));
-                console.log(LOG_TAG, 'has quota_snapshots:', !!(userData && userData.quota_snapshots));
+                console.log(LOG_TAG, 'userData keys:', userData && typeof userData === 'object' ? Object.keys(userData).join(', ') : 'N/A');
                 if (userData && typeof userData === 'object') {
                     quotaInfo.copilot_user = userData;
+
+                    // (A) New format: limited_user_quotas (array/object) + limited_user_reset_date
+                    if (userData.limited_user_quotas) {
+                        console.log(LOG_TAG, 'limited_user_quotas:', JSON.stringify(userData.limited_user_quotas));
+                        console.log(LOG_TAG, 'limited_user_reset_date:', userData.limited_user_reset_date);
+                        quotaInfo.limited_user_quotas = userData.limited_user_quotas;
+                        quotaInfo.limited_user_reset_date = userData.limited_user_reset_date;
+                    }
+                    // (B) Old format: quota_snapshots
                     if (userData.quota_snapshots) {
                         quotaInfo.quota_snapshots = userData.quota_snapshots;
                     }
@@ -592,11 +600,15 @@
                     <div class="text-gray-500 text-xs">(SKU: ${escapeHtml(q.plan)})</div>
                 </div></div>`;
 
-            // === 2. Copilot 할당량 (quota_snapshots from copilot_internal/user) ===
-            if (q.quota_snapshots) {
+            // === 2. Copilot 할당량 ===
+            // Supports both old format (quota_snapshots) and new format (limited_user_quotas)
+            const hasOldQuota = !!q.quota_snapshots;
+            const hasNewQuota = !!q.limited_user_quotas;
+
+            if (hasOldQuota) {
+                // --- Old format: quota_snapshots { premium_interactions, chat, completions, ... } ---
                 const snap = q.quota_snapshots;
 
-                // 2a. Premium Interactions (메인 할당량)
                 if (snap.premium_interactions) {
                     const pi = snap.premium_interactions;
                     const remaining = pi.remaining ?? 0;
@@ -623,7 +635,6 @@
                         </div></div>`;
                 }
 
-                // 2b. Other quotas (chat, completions, etc.)
                 const otherQuotas = Object.entries(snap).filter(([k]) => k !== 'premium_interactions');
                 if (otherQuotas.length > 0) {
                     let oqHtml = '';
@@ -651,6 +662,58 @@
                     html += `<div class="bg-gray-800 border border-gray-700 rounded-lg p-4 mb-3">
                         <h4 class="text-white font-bold mb-3">📋 기타 할당량</h4>
                         <div class="bg-gray-900 p-3 rounded">${oqHtml}</div></div>`;
+                }
+            } else if (hasNewQuota) {
+                // --- New format: limited_user_quotas (array or object) ---
+                const luq = q.limited_user_quotas;
+                const resetDate = q.limited_user_reset_date;
+                const quotaArr = Array.isArray(luq) ? luq : (typeof luq === 'object' && luq !== null ? Object.entries(luq).map(([k, v]) => ({ name: k, ...(typeof v === 'object' ? v : { value: v }) })) : []);
+
+                if (quotaArr.length > 0) {
+                    let luqHtml = '';
+                    for (const item of quotaArr) {
+                        const label = (item.name || item.type || item.key || 'quota').replace(/_/g, ' ');
+                        const limit = item.limit ?? item.entitlement ?? item.total ?? item.monthly ?? null;
+                        const used = item.used ?? item.consumed ?? (limit != null && item.remaining != null ? limit - item.remaining : null);
+                        const remaining = item.remaining ?? (limit != null && used != null ? limit - used : null);
+                        const unlimited = item.unlimited ?? (limit === null || limit === undefined || limit === 0);
+
+                        if (unlimited && !limit) {
+                            luqHtml += `<div class="flex items-center justify-between py-2 border-b border-gray-700 last:border-0">
+                                <span class="capitalize text-xs text-gray-300">${escapeHtml(label)}</span>
+                                <span class="text-green-400 text-xs font-bold">♾️ 무제한</span>
+                            </div>`;
+                        } else if (limit != null) {
+                            const usedVal = used ?? 0;
+                            const pctUsed = limit > 0 ? (usedVal / limit * 100) : 0;
+                            const pctRemain = 100 - pctUsed;
+                            const clr = pctRemain > 70 ? '#4ade80' : (pctRemain > 30 ? '#facc15' : '#f87171');
+                            luqHtml += `<div class="py-2 border-b border-gray-700 last:border-0">
+                                <div class="flex items-center justify-between mb-1">
+                                    <span class="capitalize text-xs text-gray-300">${escapeHtml(label)}</span>
+                                    <span class="text-xs" style="color:${clr};">${remaining != null ? remaining : (limit - usedVal)} / ${limit}</span>
+                                </div>
+                                <div class="bg-gray-700 rounded-full h-2 overflow-hidden"><div style="background:${clr}; width:${pctRemain}%; height:100%; border-radius:9999px;"></div></div>
+                            </div>`;
+                        } else {
+                            // Unknown structure — show raw
+                            luqHtml += `<div class="py-2 border-b border-gray-700 last:border-0 text-xs text-gray-400">
+                                <span class="capitalize text-gray-300">${escapeHtml(label)}:</span> <span class="font-mono">${escapeHtml(JSON.stringify(item))}</span>
+                            </div>`;
+                        }
+                    }
+                    html += `<div class="bg-gray-800 border border-gray-700 rounded-lg p-4 mb-3">
+                        <h4 class="text-white font-bold mb-3">🎯 할당량 (Limited User Quotas)</h4>
+                        <div class="bg-gray-900 p-3 rounded">${luqHtml}</div>
+                        ${resetDate ? `<div class="text-gray-500 text-xs mt-2">리셋: ${new Date(resetDate).toLocaleString('ko-KR')}</div>` : ''}
+                    </div>`;
+                } else {
+                    // luq exists but couldn't parse into array — show raw
+                    html += `<div class="bg-gray-800 border border-gray-700 rounded-lg p-4 mb-3">
+                        <h4 class="text-white font-bold mb-3">🎯 할당량 (Raw)</h4>
+                        <div class="bg-gray-900 p-3 rounded text-xs font-mono text-gray-400 whitespace-pre-wrap break-all">${escapeHtml(JSON.stringify(luq, null, 2))}</div>
+                        ${resetDate ? `<div class="text-gray-500 text-xs mt-2">리셋: ${new Date(resetDate).toLocaleString('ko-KR')}</div>` : ''}
+                    </div>`;
                 }
             } else {
                 html += `<div class="bg-yellow-950 border border-yellow-800 rounded-lg p-4 mb-3">
