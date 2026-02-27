@@ -367,10 +367,24 @@
                 },
             });
             if (userRes.ok) {
-                const userData = await userRes.json();
-                quotaInfo.copilot_user = userData;
-                if (userData.quota_snapshots) {
-                    quotaInfo.quota_snapshots = userData.quota_snapshots;
+                // nativeFetch may wrap response differently — try .json(), fall back to .data
+                let userData;
+                try {
+                    userData = await userRes.json();
+                } catch (jsonErr) {
+                    console.warn(LOG_TAG, 'userRes.json() failed, trying .data:', jsonErr.message);
+                    userData = userRes.data;
+                    if (typeof userData === 'string') {
+                        try { userData = JSON.parse(userData); } catch { /* keep as string */ }
+                    }
+                }
+                console.log(LOG_TAG, 'userData type:', typeof userData, '| keys:', userData && typeof userData === 'object' ? Object.keys(userData).join(', ') : String(userData).substring(0, 200));
+                console.log(LOG_TAG, 'has quota_snapshots:', !!(userData && userData.quota_snapshots));
+                if (userData && typeof userData === 'object') {
+                    quotaInfo.copilot_user = userData;
+                    if (userData.quota_snapshots) {
+                        quotaInfo.quota_snapshots = userData.quota_snapshots;
+                    }
                 }
                 console.log(LOG_TAG, 'Copilot user data retrieved successfully.');
             } else {
